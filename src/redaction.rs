@@ -28,15 +28,15 @@ pub fn redact_value(v: &mut Value, level: RedactionLevel) {
         Value::Object(map) => {
             for (k, val) in map.iter_mut() {
                 let k_lower = k.to_lowercase();
-                
+
                 // 1. Secret keys (Always redacted)
-                if k_lower.contains("key") 
-                    || k_lower.contains("auth") 
+                if k_lower.contains("key")
+                    || k_lower.contains("auth")
                     || k_lower.contains("token")
                     || k_lower.contains("secret")
                     || k_lower.contains("password")
                     || k_lower == "authorization"
-                    || k_lower == "cookie" 
+                    || k_lower == "cookie"
                 {
                     *val = Value::String("[REDACTED]".to_string());
                     continue;
@@ -54,9 +54,15 @@ pub fn redact_value(v: &mut Value, level: RedactionLevel) {
                     }
                     RedactionLevel::Normal => {
                         // Redact large data blobs
-                        if k_lower == "data" && val.is_string() && val.as_str().unwrap_or("").len() > 100 {
+                        if k_lower == "data"
+                            && val.is_string()
+                            && val.as_str().unwrap_or("").len() > 100
+                        {
                             *val = Value::String("[REDACTED-DATA]".to_string());
-                        } else if k_lower == "arguments" && val.is_string() && val.as_str().unwrap_or("").len() > 500 {
+                        } else if k_lower == "arguments"
+                            && val.is_string()
+                            && val.as_str().unwrap_or("").len() > 500
+                        {
                             *val = Value::String("[REDACTED-LARGE-ARGS]".to_string());
                         } else {
                             redact_value(val, level);
@@ -76,5 +82,3 @@ pub fn redact_value(v: &mut Value, level: RedactionLevel) {
         _ => {}
     }
 }
-
-

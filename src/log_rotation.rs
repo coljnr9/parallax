@@ -1,6 +1,6 @@
+use chrono::Local;
 use std::fs;
 use std::path::{Path, PathBuf};
-use chrono::Local;
 
 /// Configuration for log file rotation
 #[derive(Clone, Debug)]
@@ -80,12 +80,12 @@ impl LogRotationManager {
             let entry = entry?;
             let path = entry.path();
 
-            if path.is_file()
-                && let Some(file_name) = path.file_name()
-            {
-                let file_name_str = file_name.to_string_lossy();
-                if file_name_str.starts_with(log_prefix) {
-                    files.push(path);
+            if path.is_file() {
+                if let Some(file_name) = path.file_name() {
+                    let file_name_str = file_name.to_string_lossy();
+                    if file_name_str.starts_with(log_prefix) {
+                        files.push(path);
+                    }
                 }
             }
         }
@@ -120,4 +120,3 @@ mod tests {
         assert_eq!(config.max_files, 10);
     }
 }
-

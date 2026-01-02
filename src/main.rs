@@ -1,27 +1,26 @@
-use parallax::*;
 use parallax::db::*;
 use parallax::engine::*;
+use parallax::log_rotation::{LogRotationConfig, LogRotationManager};
 use parallax::logging::turn_id_middleware;
 use parallax::pricing::fetch_pricing;
 use parallax::tui::{App, TuiEvent};
-use parallax::log_rotation::{LogRotationManager, LogRotationConfig};
+use parallax::*;
 
 use parallax::ingress::RawTurn;
-use parallax::projections::ProviderFlavor;
-use parallax::projections::GeminiFlavor;
 use parallax::projections::AnthropicFlavor;
+use parallax::projections::GeminiFlavor;
 use parallax::projections::OpenAiFlavor;
-use parallax::projections::StandardFlavor;
 use parallax::projections::OpenRouterAdapter;
+use parallax::projections::ProviderFlavor;
+use parallax::projections::StandardFlavor;
 use parallax::streaming::StreamHandler;
 
 use axum::{
-    Json, Router,
     extract::State,
-    middleware,
+    http as ax_http, middleware,
     response::{IntoResponse, Response, Sse},
     routing::post,
-    http as ax_http,
+    Json, Router,
 };
 use clap::Parser;
 use futures_util::StreamExt;
@@ -46,7 +45,9 @@ where
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
         let mut message = String::new();
-        let mut visitor = LogVisitor { message: &mut message };
+        let mut visitor = LogVisitor {
+            message: &mut message,
+        };
         event.record(&mut visitor);
 
         let metadata = event.metadata();
@@ -84,7 +85,8 @@ impl<'a> tracing::field::Visit for LogVisitor<'a> {
 // --- SERVER ---
 
 fn detect_intent(_model: &str, payload: &serde_json::Value) -> Option<crate::tui::Intent> {
-    let raw_content = payload.get("messages")
+    let raw_content = payload
+        .get("messages")
         .or_else(|| payload.get("input"))
         .and_then(|m| m.as_array())
         .and_then(|a| a.last())
@@ -126,8 +128,11 @@ fn detect_intent_tag(clean_content: &str) -> Option<crate::tui::Intent> {
         if let Some(end_offset) = after_start.find("</system_reminder>") {
             let reminder_content = &after_start[..end_offset];
             let upper_reminder = reminder_content.to_uppercase();
-            
-            let intent = if upper_reminder.contains("AGENT") || upper_reminder.contains("COMPOSER") || upper_reminder.contains("BUILD") {
+
+            let intent = if upper_reminder.contains("AGENT")
+                || upper_reminder.contains("COMPOSER")
+                || upper_reminder.contains("BUILD")
+            {
                 crate::tui::Intent::Agent
             } else if upper_reminder.contains("PLAN") {
                 crate::tui::Intent::Plan
@@ -150,10 +155,13 @@ fn detect_intent_tag(clean_content: &str) -> Option<crate::tui::Intent> {
 
 fn detect_intent_keywords(search_window: &str) -> Option<crate::tui::Intent> {
     let content = search_window.to_uppercase();
-    
+
     let intent = if content.contains(" PLAN MODE") || content.contains(" PLANNING MODE") {
         Some(crate::tui::Intent::Plan)
-    } else if content.contains(" AGENT MODE") || content.contains(" COMPOSER MODE") || content.contains(" BUILD MODE") {
+    } else if content.contains(" AGENT MODE")
+        || content.contains(" COMPOSER MODE")
+        || content.contains(" BUILD MODE")
+    {
         Some(crate::tui::Intent::Agent)
     } else if content.contains(" DEBUG MODE") {
         Some(crate::tui::Intent::Debug)
@@ -177,23 +185,28 @@ fn detect_intent_keywords(search_window: &str) -> Option<crate::tui::Intent> {
 #[allow(dead_code)]
 async fn replay_artifact(path: &str) -> Result<()> {
     println!("--- REPLAYING ARTIFACT: {} ---", path);
-    let content = tokio::fs::read_to_string(path).await
+    let content = tokio::fs::read_to_string(path)
+        .await
         .map_err(ParallaxError::Io)?;
     let recorder: crate::debug_utils::FlightRecorder = serde_json::from_str(&content)
         .map_err(|e| ParallaxError::InvalidIngress(format!("Failed to parse artifact: {}", e)))?;
 
     if let Some(ingress_raw) = recorder.stages.get("ingress_raw") {
         println!("Stage: Ingress Raw found.");
-        let raw: RawTurn = serde_json::from_value(ingress_raw.clone())
-            .map_err(|e| ParallaxError::InvalidIngress(format!("Invalid ingress in artifact: {}", e)))?;
-        
+        let raw: RawTurn = serde_json::from_value(ingress_raw.clone()).map_err(|e| {
+            ParallaxError::InvalidIngress(format!("Invalid ingress in artifact: {}", e))
+        })?;
+
         println!("Validating...");
         raw.validate()?;
         println!("Validation OK.");
 
-        // For replay to work fully we'd need a DB pool. 
+        // For replay to work fully we'd need a DB pool.
         // We'll skip the bits that need DB for now or just print what we have.
-        println!("Replay of lifting/projection requires a DB pool. Artifact contains {} decisions.", recorder.decisions.len());
+        println!(
+            "Replay of lifting/projection requires a DB pool. Artifact contains {} decisions.",
+            recorder.decisions.len()
+        );
         for (i, d) in recorder.decisions.iter().enumerate() {
             println!("Decision {}: {}", i, d);
         }
@@ -222,7 +235,14 @@ async fn chat_completions_handler(
     let span = tracing::Span::current();
 
     if state.args.enable_debug_capture {
-        crate::debug_utils::capture_debug_snapshot("ingress_raw", "unknown", "unknown", "unknown", &payload).await;
+        crate::debug_utils::capture_debug_snapshot(
+            "ingress_raw",
+            "unknown",
+            "unknown",
+            "unknown",
+            &payload,
+        )
+        .await;
     }
 
     if let Err(resp) = validate_payload(&payload) {
@@ -256,7 +276,14 @@ async fn chat_completions_handler(
         }
     };
     if state.args.enable_debug_capture {
-        crate::debug_utils::capture_debug_snapshot("lifted", &rid, &context.conversation_id, &model_id, &lifted_json).await;
+        crate::debug_utils::capture_debug_snapshot(
+            "lifted",
+            &rid,
+            &context.conversation_id,
+            &model_id,
+            &lifted_json,
+        )
+        .await;
     }
 
     let cid = context.conversation_id.clone();
@@ -264,13 +291,8 @@ async fn chat_completions_handler(
 
     let intent = detect_intent(&model_id, &payload);
 
-    let mut recorder = crate::debug_utils::FlightRecorder::new(
-        &turn_id,
-        &rid,
-        &cid,
-        &model_id,
-        flavor.name(),
-    );
+    let mut recorder =
+        crate::debug_utils::FlightRecorder::new(&turn_id, &rid, &cid, &model_id, flavor.name());
     recorder.record_stage("ingress_raw", payload.clone());
 
     if let Err(e) = ParallaxEngine::validate_context(&context) {
@@ -286,7 +308,17 @@ async fn chat_completions_handler(
     });
 
     // Delegated to reduce complexity
-    handle_turn_processing(state, context, model_id, flavor, rid, &mut recorder, &payload, intent).await
+    handle_turn_processing(
+        state,
+        context,
+        model_id,
+        flavor,
+        rid,
+        &mut recorder,
+        &payload,
+        intent,
+    )
+    .await
 }
 
 async fn handle_validation_error(
@@ -312,7 +344,7 @@ async fn handle_turn_processing(
 ) -> Response {
     let start_time = std::time::Instant::now();
     let cid = context.conversation_id.clone();
-    
+
     let span = tracing::info_span!(
         "turn",
         cid = &cid[..8.min(cid.len())],
@@ -321,14 +353,23 @@ async fn handle_turn_processing(
 
     crate::logging::log_request_summary(payload);
 
-    let response = process_turn(state.clone(), context, model_id, flavor, rid.clone(), start_time, recorder, intent)
-        .instrument(span)
-        .await;
+    let response = process_turn(
+        state.clone(),
+        context,
+        model_id,
+        flavor,
+        rid.clone(),
+        start_time,
+        recorder,
+        intent,
+    )
+    .instrument(span)
+    .await;
 
     recorder.save().await;
 
     let latency = start_time.elapsed().as_millis();
-    
+
     let status = match response.status() {
         s if s.is_success() => 200,
         s => s.as_u16(),
@@ -356,12 +397,15 @@ fn validate_payload(payload: &serde_json::Value) -> std::result::Result<(), Box<
 
     if let Err(e) = raw.validate() {
         tracing::error!("[🖱️  -> ⚙️ ] Validation Failed: {}", e);
-        return Err(Box::new((
-            ax_http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e.to_string(), "code": "VALIDATION_ERROR" })),
-        ).into_response()));
+        return Err(Box::new(
+            (
+                ax_http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string(), "code": "VALIDATION_ERROR" })),
+            )
+                .into_response(),
+        ));
     }
-    
+
     Ok(())
 }
 
@@ -417,7 +461,8 @@ async fn process_turn(
         context.history.len()
     );
 
-    let outgoing_request = match project_request(&state, &context, &model_id, flavor, intent).await {
+    let outgoing_request = match project_request(&state, &context, &model_id, flavor, intent).await
+    {
         Ok(val) => val,
         Err(e) => return e,
     };
@@ -429,7 +474,8 @@ async fn process_turn(
             return (
                 ax_http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "Serialization failed"})),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
@@ -446,20 +492,43 @@ async fn process_turn(
         Ok(response) => {
             state.health.record_success();
             state.circuit_breaker.record_success().await;
-            
+
             // Emit health update
             let _ = state.tx_tui.send(TuiEvent::UpstreamHealthUpdate {
-                consecutive_failures: state.health.consecutive_failures.load(std::sync::atomic::Ordering::Relaxed),
-                total_requests: state.health.total_requests.load(std::sync::atomic::Ordering::Relaxed),
-                failed_requests: state.health.failed_requests.load(std::sync::atomic::Ordering::Relaxed),
+                consecutive_failures: state
+                    .health
+                    .consecutive_failures
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                total_requests: state
+                    .health
+                    .total_requests
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                failed_requests: state
+                    .health
+                    .failed_requests
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 degraded: false,
             });
 
             let is_streaming: bool = outgoing_request.stream.unwrap_or(false);
-            let tools_were_advertised = outgoing_request.tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false);
+            let tools_were_advertised = outgoing_request
+                .tools
+                .as_ref()
+                .map(|t| !t.is_empty())
+                .unwrap_or(false);
 
             if is_streaming {
-                handle_upstream_response(response, state.clone(), context, model_id, request_id, start_time, recorder, tools_were_advertised).await
+                handle_upstream_response(
+                    response,
+                    state.clone(),
+                    context,
+                    model_id,
+                    request_id,
+                    start_time,
+                    recorder,
+                    tools_were_advertised,
+                )
+                .await
             } else {
                 handle_non_streaming_response(response, recorder).await
             }
@@ -467,17 +536,26 @@ async fn process_turn(
         Err(e) => {
             state.health.record_failure();
             state.circuit_breaker.record_failure().await;
-            
+
             // Emit health update
             let _ = state.tx_tui.send(TuiEvent::UpstreamHealthUpdate {
-                consecutive_failures: state.health.consecutive_failures.load(std::sync::atomic::Ordering::Relaxed),
-                total_requests: state.health.total_requests.load(std::sync::atomic::Ordering::Relaxed),
-                failed_requests: state.health.failed_requests.load(std::sync::atomic::Ordering::Relaxed),
+                consecutive_failures: state
+                    .health
+                    .consecutive_failures
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                total_requests: state
+                    .health
+                    .total_requests
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                failed_requests: state
+                    .health
+                    .failed_requests
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 degraded: true,
             });
 
             tracing::error!("[☁️  -> ⚙️ ] Request Error: {}", e);
-            
+
             match &e.inner {
                 ParallaxError::Upstream(status, body) => {
                     recorder.record_upstream_error(*status, body);
@@ -486,7 +564,7 @@ async fn process_turn(
                     recorder.record_decision(format!("Request Error: {}", e));
                 }
             }
-            
+
             e.into_response()
         }
     }
@@ -499,35 +577,39 @@ async fn execute_upstream_request(
     let retry_policy = crate::hardening::RetryPolicy::new(state.args.max_retries, 100);
 
     state.circuit_breaker.check().await?;
-    
+
     let state_clone = state.clone();
     let req_clone = outgoing_request.clone();
-    
-    retry_policy.execute_with_retry(move || {
-        let state = state_clone.clone();
-        let req = req_clone.clone();
-        async move {
-            let response = state
-                .client
-                .post("https://openrouter.ai/api/v1/chat/completions")
-                .header("Authorization", format!("Bearer {}", state.openrouter_key))
-                .json(&req)
-                .send()
-                .await
-                .map_err(|e| ObservedError::from(ParallaxError::Network(e)))?;
 
-            let status = response.status();
-            if status.is_success() {
-                Ok(response)
-            } else {
-                let error_body = match response.text().await {
-                    Ok(text) => text,
-                    Err(_) => "Unknown error".to_string(),
-                };
-                Err(ObservedError::from(ParallaxError::Upstream(status, error_body)))
+    retry_policy
+        .execute_with_retry(move || {
+            let state = state_clone.clone();
+            let req = req_clone.clone();
+            async move {
+                let response = state
+                    .client
+                    .post("https://openrouter.ai/api/v1/chat/completions")
+                    .header("Authorization", format!("Bearer {}", state.openrouter_key))
+                    .json(&req)
+                    .send()
+                    .await
+                    .map_err(|e| ObservedError::from(ParallaxError::Network(e)))?;
+
+                let status = response.status();
+                if status.is_success() {
+                    Ok(response)
+                } else {
+                    let error_body = match response.text().await {
+                        Ok(text) => text,
+                        Err(_) => "Unknown error".to_string(),
+                    };
+                    Err(ObservedError::from(ParallaxError::Upstream(
+                        status, error_body,
+                    )))
+                }
             }
-        }
-    }).await
+        })
+        .await
 }
 
 async fn handle_non_streaming_response(
@@ -544,7 +626,7 @@ async fn handle_non_streaming_response(
     crate::logging::sanitize_response_body(&mut body);
     recorder.record_stage("sanitized_response", body.clone());
     crate::logging::log_response_summary(&body);
-    
+
     (status, Json(body)).into_response()
 }
 
@@ -649,11 +731,13 @@ async fn main() {
     // Combine everything
     tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer()
-            .with_writer(non_blocking)
-            .with_ansi(false))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking)
+                .with_ansi(false),
+        )
         .with(parallax::agent_layer::AgentNdjsonLayer::new(
-            parallax::redaction_layer::RedactingWriter::new(agent_non_blocking)
+            parallax::redaction_layer::RedactingWriter::new(agent_non_blocking),
         ))
         .with(TuiLayer { tx: tx_tui.clone() })
         .with(tracing_error::ErrorLayer::default())
@@ -665,10 +749,11 @@ async fn main() {
     // Setup log rotation manager
     let log_rotation_config = LogRotationConfig::default();
     let log_rotation_manager = LogRotationManager::new(log_rotation_config);
-    
+
     // Check and rotate logs on startup
     let _ = log_rotation_manager.check_and_rotate(std::path::Path::new("."), "parallax.log");
-    let _ = log_rotation_manager.check_and_rotate(std::path::Path::new("logs"), "trace_buffer.json");
+    let _ =
+        log_rotation_manager.check_and_rotate(std::path::Path::new("logs"), "trace_buffer.json");
 
     let args = Arc::new(Args::parse());
     let db = match init_db(&args.database).await {
@@ -704,7 +789,9 @@ async fn main() {
 
     let pricing = fetch_pricing(&client).await;
     if pricing.is_empty() {
-        tracing::warn!("Warning: Could not fetch pricing from OpenRouter. Cost tracking will be unavailable.");
+        tracing::warn!(
+            "Warning: Could not fetch pricing from OpenRouter. Cost tracking will be unavailable."
+        );
     } else {
         tracing::info!("Fetched pricing for {} models", pricing.len());
     }
@@ -714,7 +801,7 @@ async fn main() {
         args.circuit_breaker_threshold,
         std::time::Duration::from_secs(30),
     ));
-    
+
     let state = Arc::new(AppState {
         client,
         openrouter_key,
@@ -732,7 +819,10 @@ async fn main() {
         .route("/chat/completions", post(chat_completions_handler))
         .route("/health", axum::routing::get(health::liveness))
         .route("/readyz", axum::routing::get(health::readiness))
-        .route("/admin/conversation/:cid", axum::routing::get(health::admin_conversation))
+        .route(
+            "/admin/conversation/:cid",
+            axum::routing::get(health::admin_conversation),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(args.max_body_size))
         .layer(middleware::from_fn(turn_id_middleware))
         .with_state(state.clone());
@@ -750,12 +840,13 @@ async fn main() {
     let _server_handle = tokio::spawn(async move {
         tracing::info!("Parallax listening on {}", addr);
         use futures_util::FutureExt;
-        
-        let server_future = async move {
-            axum::serve(listener, app).await
-        };
-        
-        match std::panic::AssertUnwindSafe(server_future).catch_unwind().await {
+
+        let server_future = async move { axum::serve(listener, app).await };
+
+        match std::panic::AssertUnwindSafe(server_future)
+            .catch_unwind()
+            .await
+        {
             Ok(result) => {
                 if let Err(e) = result {
                     tracing::error!("Server error: {}", e);

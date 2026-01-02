@@ -1,5 +1,5 @@
 //! Tool Schema Analysis Module
-//! 
+//!
 //! Provides utilities to analyze tool definitions and determine which parameters are required
 //! vs optional. This helps classify empty tool arguments appropriately during finalization.
 
@@ -20,7 +20,7 @@ impl ToolSchema {
     pub fn from_tool_definition(tool: &Value) -> Option<Self> {
         let function = tool.get("function")?;
         let name = function.get("name")?.as_str()?.to_string();
-        
+
         let parameters = function.get("parameters")?;
         let properties = parameters.get("properties")?.as_object()?;
         let required = parameters
@@ -194,4 +194,3 @@ mod tests {
         assert!(!registry.has_required_params("list_mcp_resources"));
     }
 }
-

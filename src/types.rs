@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use uuid::Uuid;
 use tracing_error::SpanTrace;
+use uuid::Uuid;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -40,17 +40,22 @@ impl Default for UpstreamHealth {
 
 impl UpstreamHealth {
     pub fn record_success(&self) {
-        self.total_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.consecutive_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.total_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.consecutive_failures
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut last) = self.last_success.write() {
             *last = Some(Instant::now());
         }
     }
 
     pub fn record_failure(&self) {
-        self.total_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.failed_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.consecutive_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.total_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.failed_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.consecutive_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut last) = self.last_failure.write() {
             *last = Some(Instant::now());
         }
@@ -92,14 +97,46 @@ impl axum::response::IntoResponse for ObservedError {
     fn into_response(self) -> axum::response::Response {
         let (status, msg, code) = match &self.inner {
             ParallaxError::Upstream(s, m) => (*s, m.clone(), "UPSTREAM_ERROR"),
-            ParallaxError::InvalidIngress(m) => (axum::http::StatusCode::BAD_REQUEST, m.clone(), "INVALID_INGRESS"),
-            ParallaxError::Identification(m) => (axum::http::StatusCode::BAD_REQUEST, m.clone(), "IDENTIFICATION_ERROR"),
-            ParallaxError::Network(e) => (axum::http::StatusCode::BAD_GATEWAY, e.to_string(), "NETWORK_ERROR"),
-            ParallaxError::Database(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), "DATABASE_ERROR"),
-            ParallaxError::Serialization(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), "SERIALIZATION_ERROR"),
-            ParallaxError::Io(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), "IO_ERROR"),
-            ParallaxError::Internal(m, _) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, m.clone(), "INTERNAL_ERROR"),
-            ParallaxError::Protocol(m) => (axum::http::StatusCode::BAD_REQUEST, m.clone(), "PROTOCOL_ERROR"),
+            ParallaxError::InvalidIngress(m) => (
+                axum::http::StatusCode::BAD_REQUEST,
+                m.clone(),
+                "INVALID_INGRESS",
+            ),
+            ParallaxError::Identification(m) => (
+                axum::http::StatusCode::BAD_REQUEST,
+                m.clone(),
+                "IDENTIFICATION_ERROR",
+            ),
+            ParallaxError::Network(e) => (
+                axum::http::StatusCode::BAD_GATEWAY,
+                e.to_string(),
+                "NETWORK_ERROR",
+            ),
+            ParallaxError::Database(e) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                e.to_string(),
+                "DATABASE_ERROR",
+            ),
+            ParallaxError::Serialization(e) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                e.to_string(),
+                "SERIALIZATION_ERROR",
+            ),
+            ParallaxError::Io(e) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                e.to_string(),
+                "IO_ERROR",
+            ),
+            ParallaxError::Internal(m, _) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                m.clone(),
+                "INTERNAL_ERROR",
+            ),
+            ParallaxError::Protocol(m) => (
+                axum::http::StatusCode::BAD_REQUEST,
+                m.clone(),
+                "PROTOCOL_ERROR",
+            ),
         };
         (
             status,
@@ -183,10 +220,7 @@ pub enum ChatTurn {
     User(String),
     AssistantThinking(String),
     AssistantToolCall(Vec<ToolCallInfo>),
-    ToolResult {
-        id: ToolCallId,
-        content: String,
-    },
+    ToolResult { id: ToolCallId, content: String },
 }
 
 #[allow(dead_code)]
@@ -212,26 +246,33 @@ pub fn validate_history(history: &[TurnRecord]) -> Result<()> {
                 return Err(ParallaxError::Protocol(format!(
                     "History must start with system or user message, found {:?}",
                     turn.role
-                )).into());
+                ))
+                .into());
             }
-            (Some(Role::System) | Some(Role::Developer), Role::User) | (Some(Role::System) | Some(Role::Developer), Role::System) | (Some(Role::Developer), Role::Developer) => {}
+            (Some(Role::System) | Some(Role::Developer), Role::User)
+            | (Some(Role::System) | Some(Role::Developer), Role::System)
+            | (Some(Role::Developer), Role::Developer) => {}
             (Some(Role::User), Role::Assistant) => {}
             (Some(Role::Assistant), Role::User) | (Some(Role::Assistant), Role::Tool) => {}
             (Some(Role::Tool), Role::Tool) | (Some(Role::Tool), Role::Assistant) => {}
             (prev, current) => {
-                let prev_display = prev.map(|r| format!("{:?}", r)).unwrap_or_else(|| "None".to_string());
+                let prev_display = prev
+                    .map(|r| format!("{:?}", r))
+                    .unwrap_or_else(|| "None".to_string());
                 tracing::warn!(
                     "Invalid role transition detected: {} -> {:?}",
-                    prev_display, current
+                    prev_display,
+                    current
                 );
                 // We've decided NOT to panic or return hard error here to improve resilience,
-                // but we log it. If we want to be strict, we'd return Err, but let's 
+                // but we log it. If we want to be strict, we'd return Err, but let's
                 // follow the plan of removing explicit panics and making it fail-safe.
                 // For now, we'll keep the Err but ensure it's handled upstream.
                 return Err(ParallaxError::Protocol(format!(
                     "Invalid role transition at message {}: {} -> {:?}",
                     i, prev_display, current
-                )).into());
+                ))
+                .into());
             }
         }
         last_role = Some(turn.role.clone());
@@ -249,12 +290,18 @@ mod tests {
         let history = vec![
             TurnRecord {
                 role: Role::User,
-                content: vec![MessagePart::Text { content: "Hi".into(), cache_control: None }],
+                content: vec![MessagePart::Text {
+                    content: "Hi".into(),
+                    cache_control: None,
+                }],
                 tool_call_id: None,
             },
             TurnRecord {
                 role: Role::User,
-                content: vec![MessagePart::Text { content: "Still there?".into(), cache_control: None }],
+                content: vec![MessagePart::Text {
+                    content: "Still there?".into(),
+                    cache_control: None,
+                }],
                 tool_call_id: None,
             },
         ];
@@ -277,17 +324,26 @@ mod tests {
         let history = vec![
             TurnRecord {
                 role: Role::System,
-                content: vec![MessagePart::Text { content: "Sys".into(), cache_control: None }],
+                content: vec![MessagePart::Text {
+                    content: "Sys".into(),
+                    cache_control: None,
+                }],
                 tool_call_id: None,
             },
             TurnRecord {
                 role: Role::User,
-                content: vec![MessagePart::Text { content: "User".into(), cache_control: None }],
+                content: vec![MessagePart::Text {
+                    content: "User".into(),
+                    cache_control: None,
+                }],
                 tool_call_id: None,
             },
             TurnRecord {
                 role: Role::Assistant,
-                content: vec![MessagePart::Text { content: "Asst".into(), cache_control: None }],
+                content: vec![MessagePart::Text {
+                    content: "Asst".into(),
+                    cache_control: None,
+                }],
                 tool_call_id: None,
             },
         ];
@@ -295,7 +351,6 @@ mod tests {
         assert!(validate_history(&history).is_ok());
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostModel {
@@ -319,7 +374,6 @@ pub struct Usage {
 pub struct PromptTokensDetails {
     pub cached_tokens: Option<u32>,
 }
-
 
 /// --- CORE ROLES ---
 
@@ -354,21 +408,21 @@ pub struct TurnRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum MessagePart {
-    Text { 
+    Text {
         content: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<serde_json::Value>,
     },
-    Image { 
-        url: Option<String>, 
-        mime_type: Option<String>, 
+    Image {
+        url: Option<String>,
+        mime_type: Option<String>,
         data: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<serde_json::Value>,
     },
-    ToolCall { 
-        id: String, 
-        name: String, 
+    ToolCall {
+        id: String,
+        name: String,
         arguments: serde_json::Value,
         /// Methodical: A first-class signature structure
         signature: Option<HubSignature>,
@@ -377,15 +431,17 @@ pub enum MessagePart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<serde_json::Value>,
     },
-    ToolResult { 
-        tool_call_id: String, 
-        content: String, 
-        is_error: bool, 
+    ToolResult {
+        tool_call_id: String,
+        content: String,
+        is_error: bool,
         name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<serde_json::Value>,
     },
-    Thought { content: String },
+    Thought {
+        content: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -407,13 +463,16 @@ impl From<HubSignatureMetadata> for HubSignature {
         let mut thought_signature = meta.thought_signature;
 
         // Deep nesting fallback logic moved here
-        if thought_signature.is_none()
-            && let Some(details) = &meta.reasoning_details
-            && let Some(arr) = details.as_array()
-            && let Some(first) = arr.first()
-            && let Some(data) = first.get("data").and_then(|v| v.as_str())
-        {
-            thought_signature = Some(data.to_string());
+        if thought_signature.is_none() {
+            if let Some(details) = &meta.reasoning_details {
+                if let Some(arr) = details.as_array() {
+                    if let Some(first) = arr.first() {
+                        if let Some(data) = first.get("data").and_then(|v| v.as_str()) {
+                            thought_signature = Some(data.to_string());
+                        }
+                    }
+                }
+            }
         }
 
         Self {
@@ -426,14 +485,18 @@ impl From<HubSignatureMetadata> for HubSignature {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum PulsePart {
-    Text { delta: String },
-    ToolCall { 
-        id: Option<String>, 
-        name: Option<String>, 
+    Text {
+        delta: String,
+    },
+    ToolCall {
+        id: Option<String>,
+        name: Option<String>,
         arguments_delta: String,
         metadata: Option<serde_json::Value>,
     },
-    Thought { delta: String },
+    Thought {
+        delta: String,
+    },
 }
 
 /// --- STREAMING HUB (Micro Representation) ---
@@ -458,7 +521,10 @@ pub struct PulseDelta {
 
 impl PulseDelta {
     pub fn extract_reasoning(&self) -> Option<String> {
-        let val = self.extra.get("reasoning").or_else(|| self.extra.get("thought"))?;
+        let val = self
+            .extra
+            .get("reasoning")
+            .or_else(|| self.extra.get("thought"))?;
         match val.as_str() {
             Some(s) if !s.is_empty() => Some(s.to_string()),
             _ => None,
@@ -493,30 +559,47 @@ pub struct ToolCallBuffer {
 }
 
 impl TurnAccumulator {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
     pub fn push(&mut self, pulse: InternalPulse) {
-        if self.finish_reason.is_none() { self.finish_reason = pulse.finish_reason; }
-        if let Some(usage) = pulse.usage { self.usage = Some(usage); }
+        if self.finish_reason.is_none() {
+            self.finish_reason = pulse.finish_reason;
+        }
+        if let Some(usage) = pulse.usage {
+            self.usage = Some(usage);
+        }
         for part in pulse.content {
             match part {
                 PulsePart::Text { delta } => self.text_buffer.push_str(&delta),
                 PulsePart::Thought { delta } => self.thought_buffer.push_str(&delta),
-                PulsePart::ToolCall { id, name, arguments_delta, metadata } => {
+                PulsePart::ToolCall {
+                    id,
+                    name,
+                    arguments_delta,
+                    metadata,
+                } => {
                     let id_str = id.clone().unwrap_or_else(|| "default".to_string());
-                    let entry = self.tool_calls.entry(id_str.clone()).or_insert(ToolCallBuffer {
-                        name: String::new(),
-                        arguments: String::new(),
-                        metadata: serde_json::Value::Null,
-                        arguments_complete: false,
-                    });
-                    if let Some(n) = name { 
+                    let entry = self
+                        .tool_calls
+                        .entry(id_str.clone())
+                        .or_insert(ToolCallBuffer {
+                            name: String::new(),
+                            arguments: String::new(),
+                            metadata: serde_json::Value::Null,
+                            arguments_complete: false,
+                        });
+                    if let Some(n) = name {
                         tracing::debug!("[ACCUMULATOR] Tool call {} name: {}", id_str, n);
-                        entry.name = n; 
+                        entry.name = n;
                     }
-                    if let Some(m) = metadata { 
+                    if let Some(m) = metadata {
                         entry.metadata = m.clone();
                         if let Some(obj) = m.as_object() {
-                            self.signatures.entry(id_str.clone()).or_default().extend(obj.clone());
+                            self.signatures
+                                .entry(id_str.clone())
+                                .or_default()
+                                .extend(obj.clone());
                         }
                     }
                     if !arguments_delta.is_empty() {
@@ -535,46 +618,60 @@ impl TurnAccumulator {
     }
     pub fn finalize(self) -> TurnRecord {
         let mut content = Vec::new();
-        if !self.text_buffer.is_empty() { content.push(MessagePart::Text { content: self.text_buffer, cache_control: None }); }
-        if !self.thought_buffer.is_empty() { content.push(MessagePart::Thought { content: self.thought_buffer }); }
-        
+        if !self.text_buffer.is_empty() {
+            content.push(MessagePart::Text {
+                content: self.text_buffer,
+                cache_control: None,
+            });
+        }
+        if !self.thought_buffer.is_empty() {
+            content.push(MessagePart::Thought {
+                content: self.thought_buffer,
+            });
+        }
+
         for (id, buf) in self.tool_calls {
             let finalized_tool_call = Self::finalize_tool_call(id, buf);
             content.push(finalized_tool_call);
         }
-        
+
         let role = match self.role {
             Some(r) => r,
             None => Role::Assistant,
         };
-        TurnRecord { role, content, tool_call_id: None }
+        TurnRecord {
+            role,
+            content,
+            tool_call_id: None,
+        }
     }
 
     fn finalize_tool_call(id: String, buf: ToolCallBuffer) -> MessagePart {
-        let mut args_json = match crate::json_repair::repair_tool_call_arguments(&buf.name, &buf.arguments) { 
-            Ok(v) => v, 
-            Err(repair_err) => {
-                tracing::warn!(
+        let mut args_json =
+            match crate::json_repair::repair_tool_call_arguments(&buf.name, &buf.arguments) {
+                Ok(v) => v,
+                Err(repair_err) => {
+                    tracing::warn!(
                     "[FINALIZE] Tool call '{}' (id={}) has invalid arguments even after repair: {}",
                     buf.name,
                     id,
                     repair_err
                 );
-                // Return empty object as fallback rather than failing the entire operation
-                serde_json::json!({})
-            }
-        };
-        
+                    // Return empty object as fallback rather than failing the entire operation
+                    serde_json::json!({})
+                }
+            };
+
         // Hardening Hook: Sanitize tool arguments (e.g. fix mutually exclusive flags)
         crate::hardening::sanitize_tool_call(&buf.name, &mut args_json);
 
-        MessagePart::ToolCall { 
-            id, 
-            name: buf.name, 
-            arguments: args_json, 
-            signature: None, 
-            metadata: buf.metadata, 
-            cache_control: None 
+        MessagePart::ToolCall {
+            id,
+            name: buf.name,
+            arguments: args_json,
+            signature: None,
+            metadata: buf.metadata,
+            cache_control: None,
         }
     }
 }

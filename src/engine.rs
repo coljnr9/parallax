@@ -24,14 +24,18 @@ const MAX_TOOL_CALLS_PER_REQUEST: usize = 4096;
 impl ParallaxEngine {
     pub fn validate_context(context: &ConversationContext) -> Result<()> {
         if context.history.is_empty() {
-            return Err(ParallaxError::InvalidIngress("Lifted context history cannot be empty".into()).into());
+            return Err(ParallaxError::InvalidIngress(
+                "Lifted context history cannot be empty".into(),
+            )
+            .into());
         }
 
         if context.history.len() > MAX_HISTORY_LENGTH {
             return Err(ParallaxError::InvalidIngress(format!(
                 "Conversation history exceeds limit of {}",
                 MAX_HISTORY_LENGTH
-            )).into());
+            ))
+            .into());
         }
 
         let mut total_tool_calls = 0;
@@ -40,7 +44,8 @@ impl ParallaxEngine {
                 return Err(ParallaxError::InvalidIngress(format!(
                     "Message {} exceeds part limit of {}",
                     i, MAX_MESSAGE_PARTS
-                )).into());
+                ))
+                .into());
             }
 
             for part in &record.content {
@@ -50,9 +55,15 @@ impl ParallaxEngine {
             }
 
             if record.role == Role::Tool {
-                let has_result = record.content.iter().any(|p| matches!(p, MessagePart::ToolResult { .. }));
+                let has_result = record
+                    .content
+                    .iter()
+                    .any(|p| matches!(p, MessagePart::ToolResult { .. }));
                 if !has_result {
-                    tracing::warn!("Message {} is role 'tool' but contains no ToolResult parts", i);
+                    tracing::warn!(
+                        "Message {} is role 'tool' but contains no ToolResult parts",
+                        i
+                    );
                 }
             }
 
@@ -60,7 +71,8 @@ impl ParallaxEngine {
                 return Err(ParallaxError::InvalidIngress(format!(
                     "Message {} (Assistant) is empty and contains no tool calls",
                     i
-                )).into());
+                ))
+                .into());
             }
         }
 
@@ -68,7 +80,8 @@ impl ParallaxEngine {
             return Err(ParallaxError::InvalidIngress(format!(
                 "Total tool calls ({}) exceeds limit of {}",
                 total_tool_calls, MAX_TOOL_CALLS_PER_REQUEST
-            )).into());
+            ))
+            .into());
         }
 
         Ok(())
@@ -97,18 +110,20 @@ impl ParallaxEngine {
     }
 
     async fn process_raw_records(
-        messages: Vec<RawTurnRecord>, 
-        anchor_hash: &str, 
-        db: &DbPool
+        messages: Vec<RawTurnRecord>,
+        anchor_hash: &str,
+        db: &DbPool,
     ) -> Result<Vec<TurnRecord>> {
         let mut raw_records = Vec::new();
         for mut raw_rec in messages {
-            if raw_rec.role.is_none() && let Some(t) = &raw_rec.type_ {
-                raw_rec.role = match t.as_str() {
-                    "function_call" => Some(Role::Assistant),
-                    "function_call_output" => Some(Role::Tool),
-                    _ => Some(Role::User),
-                };
+            if raw_rec.role.is_none() {
+                if let Some(t) = &raw_rec.type_ {
+                    raw_rec.role = match t.as_str() {
+                        "function_call" => Some(Role::Assistant),
+                        "function_call_output" => Some(Role::Tool),
+                        _ => Some(Role::User),
+                    };
+                }
             }
             raw_records.push(Self::lift_record(raw_rec, anchor_hash, db).await?);
         }
@@ -118,14 +133,16 @@ impl ParallaxEngine {
     fn coalesce_history(raw_records: Vec<TurnRecord>) -> Vec<TurnRecord> {
         let mut history: Vec<TurnRecord> = Vec::new();
         for rec in raw_records {
-            if let Some(last) = history.last_mut()
-                && last.role == rec.role
-                && rec.role != Role::User
-                && rec.role != Role::Tool // Tool results MUST remain separate messages
-            {
-                last.content.extend(rec.content);
-                if last.tool_call_id.is_none() {
-                    last.tool_call_id = rec.tool_call_id;
+            if let Some(last) = history.last_mut() {
+                if last.role == rec.role && rec.role != Role::User && rec.role != Role::Tool
+                // Tool results MUST remain separate messages
+                {
+                    last.content.extend(rec.content);
+                    if last.tool_call_id.is_none() {
+                        last.tool_call_id = rec.tool_call_id;
+                    }
+                } else {
+                    history.push(rec);
                 }
             } else {
                 history.push(rec);
@@ -186,11 +203,17 @@ impl ParallaxEngine {
         }
 
         // 2. Handle legacy OpenAI function_call
-        if let (Some(name), Some(args), Some(id)) = (&raw_rec.name, &raw_rec.arguments, &raw_rec.call_id) {
+        if let (Some(name), Some(args), Some(id)) =
+            (&raw_rec.name, &raw_rec.arguments, &raw_rec.call_id)
+        {
             let parsed_args = match crate::json_repair::repair_tool_call_arguments(name, args) {
                 Ok(val) => val,
                 Err(e) => {
-                    tracing::warn!("[⚙️] Failed to repair legacy function_call arguments for {}: {}", name, e);
+                    tracing::warn!(
+                        "[⚙️] Failed to repair legacy function_call arguments for {}: {}",
+                        name,
+                        e
+                    );
                     serde_json::json!({ "raw": args })
                 }
             };
@@ -206,10 +229,17 @@ impl ParallaxEngine {
 
         // 3. Handle standard tool calls
         for tc in raw_rec.tool_calls {
-            let mut args = match crate::json_repair::repair_tool_call_arguments(&tc.function.name, &tc.function.arguments) {
+            let mut args = match crate::json_repair::repair_tool_call_arguments(
+                &tc.function.name,
+                &tc.function.arguments,
+            ) {
                 Ok(val) => val,
                 Err(e) => {
-                    return Err(ParallaxError::InvalidIngress(format!("Malformed tool arguments: {}", e)).into());
+                    return Err(ParallaxError::InvalidIngress(format!(
+                        "Malformed tool arguments: {}",
+                        e
+                    ))
+                    .into());
                 }
             };
 
@@ -230,22 +260,24 @@ impl ParallaxEngine {
 
         // 4. Handle legacy OpenAI function_call_output
         let tool_id = raw_rec.tool_call_id.clone().or(raw_rec.call_id.clone());
-        if role == Role::Tool && let Some(call_id) = tool_id {
-            let content_str = if let Some(o) = raw_rec.output {
-                o
-            } else {
-                match parts.first() {
-                    Some(MessagePart::Text { content, .. }) => content.clone(),
-                    _ => String::new(),
-                }
-            };
-            parts = vec![MessagePart::ToolResult {
-                tool_call_id: call_id,
-                content: content_str,
-                is_error: false,
-                name: None,
-                cache_control: None,
-            }];
+        if role == Role::Tool {
+            if let Some(call_id) = tool_id {
+                let content_str = if let Some(o) = raw_rec.output {
+                    o
+                } else {
+                    match parts.first() {
+                        Some(MessagePart::Text { content, .. }) => content.clone(),
+                        _ => String::new(),
+                    }
+                };
+                parts = vec![MessagePart::ToolResult {
+                    tool_call_id: call_id,
+                    content: content_str,
+                    is_error: false,
+                    name: None,
+                    cache_control: None,
+                }];
+            }
         }
 
         Ok(TurnRecord {
@@ -258,13 +290,19 @@ impl ParallaxEngine {
     fn process_content_parts(content: RawContent, parts: &mut Vec<MessagePart>) {
         match content {
             RawContent::String(s) => {
-                parts.push(MessagePart::Text { content: s, cache_control: None });
+                parts.push(MessagePart::Text {
+                    content: s,
+                    cache_control: None,
+                });
             }
             RawContent::Parts(raw_parts) => {
                 for p in raw_parts {
                     match p {
                         RawContentPart::Text { text, .. } => {
-                            parts.push(MessagePart::Text { content: text, cache_control: None });
+                            parts.push(MessagePart::Text {
+                                content: text,
+                                cache_control: None,
+                            });
                         }
                         RawContentPart::ImageUrl { image_url } => {
                             parts.push(MessagePart::Image {
@@ -336,7 +374,11 @@ impl ParallaxEngine {
         let meta = match serde_json::from_value::<HubSignatureMetadata>(metadata.clone()) {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!("Failed to deserialize signature metadata for {}: {}", tool_id, e);
+                tracing::warn!(
+                    "Failed to deserialize signature metadata for {}: {}",
+                    tool_id,
+                    e
+                );
                 HubSignatureMetadata {
                     thought_signature: None,
                     reasoning_details: None,
@@ -353,9 +395,11 @@ impl ParallaxEngine {
                 .is_some_and(|v| !v.as_array().is_none_or(|a| a.is_empty()))
         {
             let sig_json = serde_json::to_string(&sig).map_err(ParallaxError::Serialization)?;
-            
+
             // Extract reasoning tokens if available from OpenRouter reasoning_details
-            let reasoning_tokens = sig.reasoning_details.as_ref()
+            let reasoning_tokens = sig
+                .reasoning_details
+                .as_ref()
                 .and_then(|v| v.as_array())
                 .and_then(|arr| arr.first())
                 .and_then(|first| first.get("tokens"))
@@ -393,11 +437,14 @@ impl ParallaxEngine {
         Ok(row.map(|r| r.0))
     }
 
-    pub async fn get_context_from_db(conversation_id: &str, _db: &DbPool) -> Result<ConversationContext> {
+    pub async fn get_context_from_db(
+        conversation_id: &str,
+        _db: &DbPool,
+    ) -> Result<ConversationContext> {
         // We'll just build a skeleton context here for now as Parallax normally lifts from ingress.
         // In a real retry scenario, we'd need to reconstruct history from DB or have it passed along.
         // For the immediate goal of fixing the compile error, we'll try to find where history is stored.
-        
+
         // Actually, looking at the schema, we might not have a full 'conversations' table with all history.
         // Let's assume we can at least return a context with the ID.
         Ok(ConversationContext {

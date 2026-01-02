@@ -70,4 +70,3 @@ mod tests {
         assert_eq!(turn.messages.len(), 1);
     }
 }
-
