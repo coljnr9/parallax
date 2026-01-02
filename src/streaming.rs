@@ -1,8 +1,8 @@
 use crate::db::DbPool;
 use crate::engine::ParallaxEngine;
-use crate::types::*;
-use crate::types::ProviderPulse;
 use crate::types::LineEvent;
+use crate::types::ProviderPulse;
+use crate::types::*;
 use crate::AppState;
 use bytes::Bytes;
 use futures_util::Stream;
@@ -82,12 +82,20 @@ impl StreamHandler {
         while let Some(line_result) = lines_stream.next().await {
             line_count += 1;
             if line_count > MAX_STREAM_LINES {
-                tracing::error!("[☁️  -> ⚙️ ] Stream exceeded max line limit ({})", MAX_STREAM_LINES);
-                let _ = tx.send(Err(ParallaxError::Internal("Stream exceeded max line limit".to_string(), tracing_error::SpanTrace::capture()))).await;
+                tracing::error!(
+                    "[☁️  -> ⚙️ ] Stream exceeded max line limit ({})",
+                    MAX_STREAM_LINES
+                );
+                let _ = tx
+                    .send(Err(ParallaxError::Internal(
+                        "Stream exceeded max line limit".to_string(),
+                        tracing_error::SpanTrace::capture(),
+                    )))
+                    .await;
                 break;
             }
 
-            if let Some(should_break) = Self::process_stream_line(
+            let should_break = Self::process_stream_line(
                 line_result,
                 &mut metrics,
                 &mut has_seen_tool_call,
@@ -102,9 +110,9 @@ impl StreamHandler {
                 state.clone(),
                 model_id.clone(),
             )
-            .await
-            && should_break
-            {
+            .await;
+
+            if let Some(true) = should_break {
                 break;
             }
         }
@@ -124,7 +132,8 @@ impl StreamHandler {
             has_seen_tool_call,
             state,
             &buffered_pulses,
-        ).await;
+        )
+        .await;
     }
 
     #[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
@@ -157,7 +166,13 @@ impl StreamHandler {
         // We only warn for tools that plausibly require parameters.
         let mut empty_arg_tools: Vec<(String, String)> = Vec::new();
         for part in &finalized_turn.content {
-            if let crate::types::MessagePart::ToolCall { id, name, arguments, .. } = part {
+            if let crate::types::MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+                ..
+            } = part
+            {
                 let is_empty_object = arguments.as_object().is_some_and(|m| m.is_empty());
                 if is_empty_object {
                     let suspicious = matches!(
@@ -229,7 +244,10 @@ impl StreamHandler {
                 let _ = tx_tui.send(crate::tui::TuiEvent::LogMessage {
                     level: "WARN".to_string(),
                     target: "parallax::streaming".to_string(),
-                    message: format!("Diff-like response without tool calls detected for {}; retrying once.", request_id),
+                    message: format!(
+                        "Diff-like response without tool calls detected for {}; retrying once.",
+                        request_id
+                    ),
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 });
 
@@ -241,7 +259,9 @@ impl StreamHandler {
                     request_id,
                     tx,
                     tx_tui,
-                ).await {
+                )
+                .await
+                {
                     tracing::error!("[⚙️ ] Retry failed: {}", e);
                     let _ = tx.send(Err(e.inner)).await;
                 }
@@ -249,10 +269,14 @@ impl StreamHandler {
             } else {
                 // If it's not diff-like, we flush the buffered pulses to the client now
                 for pulse in buffered_pulses {
-                    if let Ok(json) = serde_json::to_string(pulse)
-                        && tx.send(Ok(axum::response::sse::Event::default().data(json))).await.is_err()
-                    {
-                        break;
+                    if let Ok(json) = serde_json::to_string(pulse) {
+                        if tx
+                            .send(Ok(axum::response::sse::Event::default().data(json)))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                 }
             }
@@ -271,16 +295,16 @@ impl StreamHandler {
                 let _ = tx_tui.send(crate::tui::TuiEvent::LogMessage {
                     level: "WARN".to_string(),
                     target: "parallax::streaming".to_string(),
-                    message: format!("Gemini Pro empty response for {}; falling back to Flash.", request_id),
+                    message: format!(
+                        "Gemini Pro empty response for {}; falling back to Flash.",
+                        request_id
+                    ),
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 });
 
-                if let Err(e) = Self::fallback_to_flash(
-                    state,
-                    conversation_id.to_string(),
-                    tx,
-                    tx_tui,
-                ).await {
+                if let Err(e) =
+                    Self::fallback_to_flash(state, conversation_id.to_string(), tx, tx_tui).await
+                {
                     tracing::error!("[⚙️ ] Fallback failed: {}", e);
                     let _ = tx.send(Err(e.inner)).await;
                 }
@@ -468,7 +492,9 @@ impl StreamHandler {
                 &conversation_id,
                 tx,
                 &tx_tui,
-            ).await {
+            )
+            .await
+            {
                 return;
             }
 
@@ -479,7 +505,8 @@ impl StreamHandler {
                 &model_id,
                 tx,
                 tx_tui,
-            ).await;
+            )
+            .await;
             return;
         }
 
@@ -495,9 +522,11 @@ impl StreamHandler {
     fn is_retryable_error(err: &crate::types::ProviderError) -> bool {
         match err.error.code {
             Some(429) | Some(500) | Some(502) | Some(503) | Some(504) | Some(520) => true,
-            _ => err.error.message.to_lowercase().contains("overloaded") 
-                || err.error.message.to_lowercase().contains("rate limit")
-                || err.error.message.to_lowercase().contains("timeout"),
+            _ => {
+                err.error.message.to_lowercase().contains("overloaded")
+                    || err.error.message.to_lowercase().contains("rate limit")
+                    || err.error.message.to_lowercase().contains("timeout")
+            }
         }
     }
 
@@ -515,16 +544,17 @@ impl StreamHandler {
             let _ = tx_tui.send(crate::tui::TuiEvent::LogMessage {
                 level: "WARN".to_string(),
                 target: "parallax::streaming".to_string(),
-                message: format!("Gemini Pro error: {}; falling back to Flash.", error_message),
+                message: format!(
+                    "Gemini Pro error: {}; falling back to Flash.",
+                    error_message
+                ),
                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
             });
 
-            if let Err(e) = Self::fallback_to_flash(
-                state.clone(),
-                conversation_id.to_string(),
-                tx,
-                tx_tui,
-            ).await {
+            if let Err(e) =
+                Self::fallback_to_flash(state.clone(), conversation_id.to_string(), tx, tx_tui)
+                    .await
+            {
                 tracing::error!("[⚙️ ] Fallback failed: {}", e);
                 let _ = tx.send(Err(e.inner)).await;
             }
@@ -554,7 +584,9 @@ impl StreamHandler {
             model_id.to_string(),
             tx,
             tx_tui,
-        ).await {
+        )
+        .await
+        {
             tracing::error!("[⚙️ ] Stream retry failed: {}", e);
             let _ = tx.send(Err(e.inner)).await;
         }
@@ -578,7 +610,8 @@ impl StreamHandler {
     ) -> Result<()> {
         // Find a suitable Flash model. We'll use a heuristic or common name.
         let fallback_model = "google/gemini-3-flash-preview-0814".to_string(); // Example
-        Self::execute_retry_or_fallback(state, conversation_id, fallback_model, tx, tx_tui.clone()).await
+        Self::execute_retry_or_fallback(state, conversation_id, fallback_model, tx, tx_tui.clone())
+            .await
     }
 
     async fn execute_retry_or_fallback(
@@ -595,23 +628,25 @@ impl StreamHandler {
             extra_body: serde_json::json!({}),
         };
 
-        let flavor: std::sync::Arc<dyn crate::projections::ProviderFlavor + Send + Sync> = if model_id.contains("gpt") {
-            std::sync::Arc::new(crate::projections::OpenAiFlavor)
-        } else if model_id.contains("claude") {
-            std::sync::Arc::new(crate::projections::AnthropicFlavor)
-        } else if model_id.contains("gemini") {
-            std::sync::Arc::new(crate::projections::GeminiFlavor)
-        } else {
-            std::sync::Arc::new(crate::projections::StandardFlavor)
-        };
+        let flavor: std::sync::Arc<dyn crate::projections::ProviderFlavor + Send + Sync> =
+            if model_id.contains("gpt") {
+                std::sync::Arc::new(crate::projections::OpenAiFlavor)
+            } else if model_id.contains("claude") {
+                std::sync::Arc::new(crate::projections::AnthropicFlavor)
+            } else if model_id.contains("gemini") {
+                std::sync::Arc::new(crate::projections::GeminiFlavor)
+            } else {
+                std::sync::Arc::new(crate::projections::StandardFlavor)
+            };
 
         let mut outgoing_request = crate::projections::OpenRouterAdapter::project(
             &retry_context,
             &model_id,
             flavor.as_ref(),
             &state.db,
-            None
-        ).await;
+            None,
+        )
+        .await;
 
         outgoing_request.stream = Some(true);
 
@@ -625,11 +660,20 @@ impl StreamHandler {
             .map_err(ParallaxError::Network)?;
 
         if !response.status().is_success() {
-            let err_body = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(ParallaxError::Upstream(axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Retry/Fallback failed: {}", err_body)).into());
+            let err_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(ParallaxError::Upstream(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Retry/Fallback failed: {}", err_body),
+            )
+            .into());
         }
 
-        let bytes_stream = response.bytes_stream().map(|r| r.map_err(std::io::Error::other));
+        let bytes_stream = response
+            .bytes_stream()
+            .map(|r| r.map_err(std::io::Error::other));
         let mut lines_stream = FramedRead::new(
             tokio_util::io::StreamReader::new(bytes_stream),
             LinesCodec::new_with_max_length(1024 * 1024),
@@ -638,10 +682,14 @@ impl StreamHandler {
         while let Some(line_result) = lines_stream.next().await {
             match line_result {
                 Ok(line) => {
-                    if let Some(data) = line.strip_prefix("data: ")
-                         && tx.send(Ok(axum::response::sse::Event::default().data(data))).await.is_err()
-                    {
-                        break;
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if tx
+                            .send(Ok(axum::response::sse::Event::default().data(data)))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                 }
                 _ => break,
@@ -684,13 +732,7 @@ impl StreamHandler {
         Self::sanitize_tool_calls(&mut pulse, has_seen_tool_call);
 
         tracing::trace!("[☁️  -> ⚙️ ] Pulse: {:?}", pulse);
-        Self::process_pulse(
-            &pulse,
-            conversation_id,
-            tool_index_map,
-            accumulator,
-        )
-        .await;
+        Self::process_pulse(&pulse, conversation_id, tool_index_map, accumulator).await;
 
         // If tools were advertised but we haven't seen any tool calls yet,
         // we buffer the response instead of sending it directly to the client.
@@ -703,23 +745,29 @@ impl StreamHandler {
         // Send buffered pulses if this is the first tool call
         if *has_seen_tool_call && !buffered_pulses.is_empty() {
             for p in buffered_pulses.drain(..) {
-                if let Ok(json) = serde_json::to_string(&p)
-                    && tx.send(Ok(axum::response::sse::Event::default().data(json))).await.is_err()
-                {
-                    break;
+                if let Ok(json) = serde_json::to_string(&p) {
+                    if tx
+                        .send(Ok(axum::response::sse::Event::default().data(json)))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
             }
         }
 
         // Re-serialize the sanitized pulse
-        if let Ok(sanitized_json) = serde_json::to_string(&pulse)
-            && tx
-                .send(Ok(axum::response::sse::Event::default()
-                    .data(sanitized_json)))
+        if let Ok(sanitized_json) = serde_json::to_string(&pulse) {
+            if tx
+                .send(Ok(
+                    axum::response::sse::Event::default().data(sanitized_json)
+                ))
                 .await
                 .is_err()
-        {
-            tracing::trace!("Client disconnected, stopping stream");
+            {
+                tracing::trace!("Client disconnected, stopping stream");
+            }
         }
         // Emit TUI StreamUpdate
         for choice in &pulse.choices {
@@ -735,14 +783,14 @@ impl StreamHandler {
                 })
             });
 
-            if let Some(content) = &choice.delta.content
-                && !content.is_empty()
-            {
-                let _ = tx_tui.send(crate::tui::TuiEvent::StreamUpdate {
-                    id: request_id.to_string(),
-                    content_delta: content.clone(),
-                    tool_call: tool_call_desc.clone(),
-                });
+            if let Some(content) = &choice.delta.content {
+                if !content.is_empty() {
+                    let _ = tx_tui.send(crate::tui::TuiEvent::StreamUpdate {
+                        id: request_id.to_string(),
+                        content_delta: content.clone(),
+                        tool_call: tool_call_desc.clone(),
+                    });
+                }
             } else if let Some(tc) = tool_call_desc {
                 let _ = tx_tui.send(crate::tui::TuiEvent::StreamUpdate {
                     id: request_id.to_string(),
@@ -751,14 +799,14 @@ impl StreamHandler {
                 });
             }
 
-            if let Some(thought) = choice.delta.extract_reasoning()
-                && !thought.is_empty()
-            {
-                let _ = tx_tui.send(crate::tui::TuiEvent::StreamUpdate {
-                    id: request_id.to_string(),
-                    content_delta: thought,
-                    tool_call: None,
-                });
+            if let Some(thought) = choice.delta.extract_reasoning() {
+                if !thought.is_empty() {
+                    let _ = tx_tui.send(crate::tui::TuiEvent::StreamUpdate {
+                        id: request_id.to_string(),
+                        content_delta: thought,
+                        tool_call: None,
+                    });
+                }
             }
         }
     }
@@ -772,9 +820,9 @@ impl StreamHandler {
         _tx_tui: &tokio::sync::broadcast::Sender<crate::tui::TuiEvent>,
     ) -> Result<()> {
         // Fetch original conversation context to retry
-        // In a real scenario, we'd need to reconstruct history. 
+        // In a real scenario, we'd need to reconstruct history.
         // For now, we'll try to find a way to get the context or at least the last turn.
-        
+
         let mut retry_context = ConversationContext {
             history: Vec::new(),
             conversation_id: conversation_id.to_string(),
@@ -791,31 +839,36 @@ impl StreamHandler {
         });
 
         // Determine flavor
-        let flavor: std::sync::Arc<dyn crate::projections::ProviderFlavor + Send + Sync> = if model_id.contains("gpt") {
-            std::sync::Arc::new(crate::projections::OpenAiFlavor)
-        } else if model_id.contains("claude") {
-            std::sync::Arc::new(crate::projections::AnthropicFlavor)
-        } else if model_id.contains("gemini") {
-            std::sync::Arc::new(crate::projections::GeminiFlavor)
-        } else {
-            std::sync::Arc::new(crate::projections::StandardFlavor)
-        };
+        let flavor: std::sync::Arc<dyn crate::projections::ProviderFlavor + Send + Sync> =
+            if model_id.contains("gpt") {
+                std::sync::Arc::new(crate::projections::OpenAiFlavor)
+            } else if model_id.contains("claude") {
+                std::sync::Arc::new(crate::projections::AnthropicFlavor)
+            } else if model_id.contains("gemini") {
+                std::sync::Arc::new(crate::projections::GeminiFlavor)
+            } else {
+                std::sync::Arc::new(crate::projections::StandardFlavor)
+            };
 
-        let intent = None; 
+        let intent = None;
 
         let mut outgoing_request = crate::projections::OpenRouterAdapter::project(
             &retry_context,
             model_id,
             flavor.as_ref(),
             &state.db,
-            intent
-        ).await;
+            intent,
+        )
+        .await;
 
         outgoing_request.stream = Some(true);
 
         // Record retry attempt in flight recorder if possible
         // (We'd need the recorder passed in, but we have the request_id)
-        tracing::info!("[⚙️ ] Executing retry for {} with enforcement", conversation_id);
+        tracing::info!(
+            "[⚙️ ] Executing retry for {} with enforcement",
+            conversation_id
+        );
 
         // Execute retry
         let response = state
@@ -828,11 +881,20 @@ impl StreamHandler {
             .map_err(ParallaxError::Network)?;
 
         if !response.status().is_success() {
-            let err_body = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(ParallaxError::Upstream(axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Retry failed: {}", err_body)).into());
+            let err_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(ParallaxError::Upstream(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Retry failed: {}", err_body),
+            )
+            .into());
         }
 
-        let bytes_stream = response.bytes_stream().map(|r| r.map_err(std::io::Error::other));
+        let bytes_stream = response
+            .bytes_stream()
+            .map(|r| r.map_err(std::io::Error::other));
         let mut lines_stream = FramedRead::new(
             tokio_util::io::StreamReader::new(bytes_stream),
             LinesCodec::new_with_max_length(1024 * 1024),
@@ -841,10 +903,14 @@ impl StreamHandler {
         while let Some(line_result) = lines_stream.next().await {
             match line_result {
                 Ok(line) => {
-                    if let Some(data) = line.strip_prefix("data: ")
-                         && tx.send(Ok(axum::response::sse::Event::default().data(data))).await.is_err()
-                    {
-                        break;
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if tx
+                            .send(Ok(axum::response::sse::Event::default().data(data)))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                 }
                 _ => break,
@@ -855,18 +921,16 @@ impl StreamHandler {
     }
 
     fn sanitize_tool_calls(pulse: &mut ProviderPulse, has_seen_tool_call: &mut bool) {
-        if *has_seen_tool_call
-            || pulse.choices.iter().any(|c| c.delta.tool_calls.is_some())
-        {
+        if *has_seen_tool_call || pulse.choices.iter().any(|c| c.delta.tool_calls.is_some()) {
             *has_seen_tool_call = true;
             for choice in &mut pulse.choices {
                 if choice.delta.content.is_some() {
                     choice.delta.content = None;
                 }
-                if let Some(reason) = &choice.finish_reason
-                    && reason == "stop"
-                {
-                    choice.finish_reason = Some("tool_calls".to_string());
+                if let Some(reason) = &choice.finish_reason {
+                    if reason == "stop" {
+                        choice.finish_reason = Some("tool_calls".to_string());
+                    }
                 }
             }
         }
@@ -923,7 +987,10 @@ impl StreamHandler {
             } else if let Some(id) = tool_index_map.get(&td.index) {
                 (Some(id.clone()), ToolIdSource::MappedFromIndex)
             } else {
-                (Some(format!("tool_index_{}", td.index)), ToolIdSource::SyntheticIndex)
+                (
+                    Some(format!("tool_index_{}", td.index)),
+                    ToolIdSource::SyntheticIndex,
+                )
             };
 
             if td.id.is_none() {
@@ -971,14 +1038,14 @@ impl StreamHandler {
                     if let Some(id) = &td.id {
                         tool_index_map.insert(td.index, id.clone());
                     }
-                    if let Some(id) = tool_index_map.get(&td.index)
-                        && !td.extra.is_empty()
-                    {
-                        accumulator
-                            .signatures
-                            .entry(id.clone())
-                            .or_default()
-                            .extend(td.extra.clone());
+                    if let Some(id) = tool_index_map.get(&td.index) {
+                        if !td.extra.is_empty() {
+                            accumulator
+                                .signatures
+                                .entry(id.clone())
+                                .or_default()
+                                .extend(td.extra.clone());
+                        }
                     }
                 }
             }
@@ -1014,12 +1081,12 @@ impl StreamHandler {
         }
 
         // 2. Text Content
-        if let Some(ref text) = choice.delta.content
-            && !text.is_empty()
-        {
-            content.push(PulsePart::Text {
-                delta: text.clone(),
-            });
+        if let Some(ref text) = choice.delta.content {
+            if !text.is_empty() {
+                content.push(PulsePart::Text {
+                    delta: text.clone(),
+                });
+            }
         }
 
         // 3. Reasoning / Thought (from extra)
@@ -1065,12 +1132,16 @@ impl StreamHandler {
 
         let usage_str = match usage {
             Some(u) => {
-                let cache_str = u.prompt_tokens_details.as_ref()
+                let cache_str = u
+                    .prompt_tokens_details
+                    .as_ref()
                     .and_then(|d| d.cached_tokens)
                     .map(|c| format!(" ({} cached)", c))
                     .unwrap_or_default();
-                format!("Prompt: {}{}, Completion: {}, Total: {}", 
-                    u.prompt_tokens, cache_str, u.completion_tokens, u.total_tokens)
+                format!(
+                    "Prompt: {}{}, Completion: {}, Total: {}",
+                    u.prompt_tokens, cache_str, u.completion_tokens, u.total_tokens
+                )
             }
             None => "Usage unavailable".to_string(),
         };
@@ -1089,4 +1160,3 @@ impl StreamHandler {
         );
     }
 }
-

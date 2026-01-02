@@ -1,7 +1,7 @@
+use crate::types::{ParallaxError, Result};
 use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
 use std::path::Path;
-use crate::types::{Result, ParallaxError};
 
 pub type DbPool = SqlitePool;
 
@@ -12,7 +12,8 @@ pub async fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
             return Err(ParallaxError::Internal(
                 "Invalid database path: Path contains non-UTF8 characters".to_string(),
                 tracing_error::SpanTrace::capture(),
-            ).into())
+            )
+            .into())
         }
     };
     let url = format!("sqlite:{}?mode=rwc", path_str);
@@ -26,7 +27,11 @@ pub async fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
 
     // Run Migrations
     if let Err(e) = sqlx::migrate!("./migrations").run(&pool).await {
-        return Err(ParallaxError::Internal(format!("Migration failed: {}", e), tracing_error::SpanTrace::capture()).into());
+        return Err(ParallaxError::Internal(
+            format!("Migration failed: {}", e),
+            tracing_error::SpanTrace::capture(),
+        )
+        .into());
     }
 
     verify_schema_version(&pool).await;
@@ -57,9 +62,10 @@ async fn configure_db(pool: &DbPool) -> Result<()> {
 
 async fn verify_schema_version(pool: &DbPool) {
     // Verify Schema Version
-    let version_row: std::result::Result<(String,), sqlx::Error> = sqlx::query_as("SELECT value FROM schema_metadata WHERE key = 'schema_version'")
-        .fetch_one(pool)
-        .await;
+    let version_row: std::result::Result<(String,), sqlx::Error> =
+        sqlx::query_as("SELECT value FROM schema_metadata WHERE key = 'schema_version'")
+            .fetch_one(pool)
+            .await;
 
     match version_row {
         Ok((version,)) => {
@@ -71,18 +77,23 @@ async fn verify_schema_version(pool: &DbPool) {
     }
 }
 
-pub async fn cleanup_old_data(pool: &DbPool, retention_days: i64) -> std::result::Result<(), sqlx::Error> {
+pub async fn cleanup_old_data(
+    pool: &DbPool,
+    retention_days: i64,
+) -> std::result::Result<(), sqlx::Error> {
     let threshold = format!("-{} days", retention_days);
-    
-    let deleted_sigs = sqlx::query("DELETE FROM tool_signatures WHERE created_at < datetime('now', ?)")
-        .bind(&threshold)
-        .execute(pool)
-        .await?;
 
-    let deleted_states = sqlx::query("DELETE FROM conversation_states WHERE updated_at < datetime('now', ?)")
-        .bind(&threshold)
-        .execute(pool)
-        .await?;
+    let deleted_sigs =
+        sqlx::query("DELETE FROM tool_signatures WHERE created_at < datetime('now', ?)")
+            .bind(&threshold)
+            .execute(pool)
+            .await?;
+
+    let deleted_states =
+        sqlx::query("DELETE FROM conversation_states WHERE updated_at < datetime('now', ?)")
+            .bind(&threshold)
+            .execute(pool)
+            .await?;
 
     if deleted_sigs.rows_affected() > 0 || deleted_states.rows_affected() > 0 {
         println!(
@@ -96,7 +107,10 @@ pub async fn cleanup_old_data(pool: &DbPool, retention_days: i64) -> std::result
     Ok(())
 }
 
-pub async fn get_conversation_history(cid: &str, pool: &DbPool) -> crate::types::Result<Vec<crate::types::TurnRecord>> {
+pub async fn get_conversation_history(
+    cid: &str,
+    pool: &DbPool,
+) -> crate::types::Result<Vec<crate::types::TurnRecord>> {
     let row = sqlx::query("SELECT state_json FROM conversation_states WHERE id = ?")
         .bind(cid)
         .fetch_optional(pool)

@@ -1,5 +1,5 @@
 //! JSON Repair and Streaming Buffer Module
-//! 
+//!
 //! Handles incomplete JSON from streaming APIs by detecting incomplete structures
 //! and attempting to repair them gracefully.
 
@@ -109,14 +109,12 @@ pub fn parse_json_with_repair(json_str: &str) -> Result<Value, String> {
             );
             Ok(value)
         }
-        Err(e) => {
-            Err(format!(
-                "Failed to parse JSON even after repair: {} (original: {} chars, repaired: {} chars)",
-                e,
-                json_str.len(),
-                repaired.len()
-            ))
-        }
+        Err(e) => Err(format!(
+            "Failed to parse JSON even after repair: {} (original: {} chars, repaired: {} chars)",
+            e,
+            json_str.len(),
+            repaired.len()
+        )),
     }
 }
 
@@ -144,19 +142,20 @@ pub fn repair_tool_call_arguments(name: &str, arguments: &str) -> Result<Value, 
             );
             Ok(value)
         }
-        Err(e) => {
-            Err(format!(
-                "Failed to repair tool '{}' arguments: {} (original: {} chars, repaired: {} chars)",
-                name, e, arguments.len(), repaired.len()
-            ))
-        }
+        Err(e) => Err(format!(
+            "Failed to repair tool '{}' arguments: {} (original: {} chars, repaired: {} chars)",
+            name,
+            e,
+            arguments.len(),
+            repaired.len()
+        )),
     }
 }
 
 /// Special repair logic for create_plan tool arguments
 fn repair_create_plan_arguments(arguments: &str) -> Result<Value, String> {
     let trimmed = arguments.trim();
-    
+
     // If it's empty or just whitespace, return default structure
     if trimmed.is_empty() {
         return Ok(serde_json::json!({
@@ -176,18 +175,24 @@ fn repair_create_plan_arguments(arguments: &str) -> Result<Value, String> {
             });
             return Ok(repaired_value);
         }
-        
+
         // If it's already an object, ensure it has required fields
         if let Some(obj) = value.as_object_mut() {
             if !obj.contains_key("plan") {
-                obj.insert("plan".to_string(), serde_json::Value::String("No plan content provided.".to_string()));
+                obj.insert(
+                    "plan".to_string(),
+                    serde_json::Value::String("No plan content provided.".to_string()),
+                );
             }
             if !obj.contains_key("name") {
-                obj.insert("name".to_string(), serde_json::Value::String("Implementation Plan".to_string()));
+                obj.insert(
+                    "name".to_string(),
+                    serde_json::Value::String("Implementation Plan".to_string()),
+                );
             }
             return Ok(value);
         }
-        
+
         return Ok(value);
     }
 
@@ -197,12 +202,12 @@ fn repair_create_plan_arguments(arguments: &str) -> Result<Value, String> {
         "plan": plan_content,
         "name": "Implementation Plan"
     });
-    
+
     tracing::warn!(
         "[JSON-REPAIR] create_plan arguments treated as plain text: {} chars",
         arguments.len()
     );
-    
+
     Ok(repaired_value)
 }
 
@@ -273,7 +278,7 @@ mod tests {
     fn test_repair_tool_call_arguments_create_plan_string() {
         let result = repair_tool_call_arguments("create_plan", "This is a plan without JSON");
         assert!(result.is_ok());
-        
+
         let value = result.unwrap();
         let obj = value.as_object().unwrap();
         assert!(obj.contains_key("plan"));
@@ -285,22 +290,30 @@ mod tests {
     fn test_repair_tool_call_arguments_create_plan_empty() {
         let result = repair_tool_call_arguments("create_plan", "");
         assert!(result.is_ok(), "Repair should succeed for empty arguments");
-        
+
         let value = result.unwrap();
         println!("Empty args result: {:?}", value);
         let obj = value.as_object().expect("Result should be an object");
-        assert!(obj.contains_key("plan"), "Should contain 'plan' key, got: {:?}", obj.keys().collect::<Vec<_>>());
+        assert!(
+            obj.contains_key("plan"),
+            "Should contain 'plan' key, got: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
         assert!(obj.contains_key("name"), "Should contain 'name' key");
         let plan_content = obj["plan"].as_str().unwrap();
-        assert!(plan_content.contains("No plan provided") || plan_content.contains("Implementation Plan"), 
-               "Plan should mention no plan provided or be default, got: {}", plan_content);
+        assert!(
+            plan_content.contains("No plan provided")
+                || plan_content.contains("Implementation Plan"),
+            "Plan should mention no plan provided or be default, got: {}",
+            plan_content
+        );
     }
 
     #[test]
     fn test_repair_tool_call_arguments_create_plan_partial_json() {
         let result = repair_tool_call_arguments("create_plan", r#"{"plan": "Partial plan"#);
         assert!(result.is_ok());
-        
+
         let value = result.unwrap();
         let obj = value.as_object().unwrap();
         assert!(obj.contains_key("plan"), "Should contain 'plan' key");
@@ -314,7 +327,7 @@ mod tests {
     fn test_repair_tool_call_arguments_other_tool() {
         let result = repair_tool_call_arguments("grep", r#"{"pattern": "test""#);
         assert!(result.is_ok());
-        
+
         let value = result.unwrap();
         assert!(value.is_object());
     }
@@ -323,10 +336,13 @@ mod tests {
     fn test_repair_create_plan_arguments_plain_text() {
         let result = repair_create_plan_arguments("This is just plain text plan");
         assert!(result.is_ok());
-        
+
         let value = result.unwrap();
         let obj = value.as_object().unwrap();
-        assert_eq!(obj["plan"].as_str().unwrap(), "This is just plain text plan");
+        assert_eq!(
+            obj["plan"].as_str().unwrap(),
+            "This is just plain text plan"
+        );
         assert_eq!(obj["name"].as_str().unwrap(), "Implementation Plan");
     }
 
@@ -334,7 +350,7 @@ mod tests {
     fn test_repair_create_plan_arguments_json_string() {
         let result = repair_create_plan_arguments(r#"{"plan": "JSON plan content"}"#);
         assert!(result.is_ok());
-        
+
         let value = result.unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj["plan"].as_str().unwrap(), "JSON plan content");
@@ -343,10 +359,11 @@ mod tests {
 
     #[test]
     fn test_repair_create_plan_arguments_complete_json() {
-        let input = r#"{"plan": "Complete plan", "name": "Custom Plan", "overview": "Test overview"}"#;
+        let input =
+            r#"{"plan": "Complete plan", "name": "Custom Plan", "overview": "Test overview"}"#;
         let result = repair_create_plan_arguments(input);
         assert!(result.is_ok());
-        
+
         let value = result.unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj["plan"].as_str().unwrap(), "Complete plan");
@@ -354,4 +371,3 @@ mod tests {
         assert_eq!(obj["overview"].as_str().unwrap(), "Test overview");
     }
 }
-

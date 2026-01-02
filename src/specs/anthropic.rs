@@ -45,12 +45,12 @@ pub struct CacheControl {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum AnthropicContentPart {
-    Text { 
+    Text {
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
-    Image { 
+    Image {
         source: AnthropicImageSource,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
@@ -75,24 +75,7 @@ pub enum AnthropicContentPart {
 #[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AnthropicImageSource {
-    pub r#type: String, // e.g. "base64"
+    pub r#type: String,     // e.g. "base64"
     pub media_type: String, // e.g. "image/jpeg"
     pub data: String,
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

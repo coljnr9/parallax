@@ -1,9 +1,9 @@
 //! Conversation History Pruning Module
-//! 
+//!
 //! Implements strategies to reduce conversation history depth and size to avoid
 //! hitting provider limits (especially Google's recursion depth limits).
 
-use crate::types::{MessagePart, TurnRecord, Role};
+use crate::types::{MessagePart, Role, TurnRecord};
 
 /// Analyzes the depth of a conversation history
 #[derive(Debug, Clone)]
@@ -235,7 +235,10 @@ fn summarize_turn(turn: &TurnRecord) -> Option<TurnRecord> {
             MessagePart::ToolResult { name, .. } => {
                 // Replace tool results with summary
                 summary_parts.push(MessagePart::Text {
-                    content: format!("[Tool result: {}]", name.as_ref().unwrap_or(&"unknown".to_string())),
+                    content: format!(
+                        "[Tool result: {}]",
+                        name.as_ref().unwrap_or(&"unknown".to_string())
+                    ),
                     cache_control: None,
                 });
             }
@@ -352,4 +355,3 @@ mod tests {
         assert!(pruned.iter().any(|t| t.role == Role::System));
     }
 }
-

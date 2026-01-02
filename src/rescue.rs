@@ -14,19 +14,19 @@ pub fn detect_xml_invoke(text: &str) -> Option<RescueResult> {
     let start_idx = text.find("<invoke")?;
     let end_tag = "</invoke>";
     let end_idx = text.find(end_tag)?;
-    
+
     let tag_content = &text[start_idx..end_idx + end_tag.len()];
-    
+
     // Extract name
     let name_start = tag_content.find("name=\"")? + 6;
     let name_end = tag_content[name_start..].find("\"")? + name_start;
     let name = tag_content[name_start..name_end].to_string();
-    
+
     // Extract body (JSON)
     let body_start = tag_content.find(">")? + 1;
     let body_end = tag_content.find("</invoke>")?;
     let body_str = tag_content[body_start..body_end].trim();
-    
+
     let arguments = if body_str.is_empty() {
         "{}".to_string()
     } else {
@@ -45,4 +45,3 @@ pub fn detect_xml_invoke(text: &str) -> Option<RescueResult> {
         }),
     })
 }
-

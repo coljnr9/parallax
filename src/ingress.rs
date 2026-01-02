@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize, Deserializer};
 use crate::types::*;
-use sha2::{Sha256, Digest};
+use serde::{Deserialize, Deserializer, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct CursorMetadata {
@@ -94,7 +94,8 @@ impl RawTurnRecord {
                 return Err(ParallaxError::InvalidIngress(format!(
                     "Message at index {} has role 'tool' but is missing a tool_call_id",
                     index
-                )).into());
+                ))
+                .into());
             }
         }
 
@@ -126,7 +127,8 @@ impl RawTurnRecord {
             return Err(ParallaxError::InvalidIngress(format!(
                 "Message {} (User) cannot have null content",
                 index
-            )).into());
+            ))
+            .into());
         }
 
         Ok(())
@@ -201,7 +203,10 @@ pub struct RawFunction {
 impl RawTurn {
     pub fn validate(&self) -> Result<()> {
         if self.messages.is_empty() {
-            return Err(ParallaxError::InvalidIngress("Request must contain at least one message".into()).into());
+            return Err(ParallaxError::InvalidIngress(
+                "Request must contain at least one message".into(),
+            )
+            .into());
         }
 
         for (i, msg) in self.messages.iter().enumerate() {
@@ -214,15 +219,21 @@ impl RawTurn {
     pub fn generate_anchor_hash(&self) -> Result<String> {
         let mut hasher = Sha256::new();
         hasher.update(self.model.model_name());
-        if let Some(u) = &self.user { hasher.update(u); }
-        
+        if let Some(u) = &self.user {
+            hasher.update(u);
+        }
+
         let anchor_text = self.extract_anchor_text();
         let cleaned_text = self.clean_anchor_text(anchor_text);
-        
+
         hasher.update(cleaned_text.trim().as_bytes());
         let hash = format!("{:x}", hasher.finalize());
         let model_name = self.model.model_name();
-        tracing::info!("[⚙️  -> ⚙️ ] Identify: [{}...] Model: {}", &hash[..8.min(hash.len())], model_name);
+        tracing::info!(
+            "[⚙️  -> ⚙️ ] Identify: [{}...] Model: {}",
+            &hash[..8.min(hash.len())],
+            model_name
+        );
         Ok(hash)
     }
 
@@ -232,27 +243,33 @@ impl RawTurn {
                 Some(RawContent::String(s)) => s.as_str(),
                 _ => "",
             };
-            
+
             if content.contains("<user_query>") {
-                if let Some(start) = content.find("<user_query>")
-                    && let Some(end) = content.find("</user_query>") {
+                if let Some(start) = content.find("<user_query>") {
+                    if let Some(end) = content.find("</user_query>") {
                         return content[start + 12..end].to_string();
                     }
+                }
                 return content.to_string();
             }
         }
 
-        let first_user = self.messages.iter()
-            .find(|m| m.role == Some(Role::User));
-            
+        let first_user = self.messages.iter().find(|m| m.role == Some(Role::User));
+
         match first_user {
             Some(msg) => match &msg.content {
                 Some(RawContent::String(s)) => s.clone(),
-                Some(RawContent::Parts(parts)) => {
-                    parts.iter().filter_map(|p| {
-                        if let RawContentPart::Text { text, .. } = p { Some(text.clone()) } else { None }
-                    }).collect::<Vec<_>>().join(" ")
-                }
+                Some(RawContent::Parts(parts)) => parts
+                    .iter()
+                    .filter_map(|p| {
+                        if let RawContentPart::Text { text, .. } = p {
+                            Some(text.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
                 _ => String::new(),
             },
             None => String::new(),
@@ -266,9 +283,9 @@ impl RawTurn {
             "communication",
             "terminal_files_information",
             "project_layout",
-            "user_info"
+            "user_info",
         ];
-        
+
         for tag in tags {
             let start_tag = format!("<{}>", tag);
             let end_tag = format!("</{}>", tag);
@@ -293,4 +310,3 @@ impl RawTurn {
         }
     }
 }
-
