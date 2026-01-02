@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build - ${{ matrix.platform.os }}
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      matrix:
+        platform:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: parallax-linux-x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: parallax-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: parallax-macos-aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: parallax-windows-x86_64.exe
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+      
+      - name: Build Binary
+        run: cargo build --release --target ${{ matrix.platform.target }}
+      
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform.name }}
+          path: target/${{ matrix.platform.target }}/release/${{ matrix.platform.os == 'windows-latest' && 'parallax.exe' || 'parallax' }}
+
+  publish:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Prepare Release Assets
+        run: |
+          mkdir release_assets
+          find artifacts -type f -exec cp {} release_assets/ \;
+          cd release_assets
+          sha256sum * > checksums.txt
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release_assets/*
+          generate_release_notes: true
+

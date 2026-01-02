@@ -1,0 +1,8 @@
+/target
+logs/*
+parallax.log*
+debug_capture/
+parallax.db*
+requests/
+failed_requests/
+.env

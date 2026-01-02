@@ -1,0 +1,22 @@
+---
+description: Rust coding standards and mandatory checks for Parallax
+globs: src/**/*.rs, tests/**/*.rs
+---
+
+# Rust Standards for Parallax
+
+## Error Handling
+- **NO UNWRAP**: Usage of `.unwrap()`, `.expect()`, `.unwrap_or()`, `.ok_or()`, etc. is strictly forbidden.
+- **EXPLICIT HANDLING**: Use `match` or `if let` for all `Option` and `Result` handling.
+- **ERROR MAPPING**: Ensure errors are correctly mapped to the internal `ParallaxError` type.
+
+## Mandatory Completion Checks
+Every task is only "Done" when the following checks pass:
+1. `cargo check`
+2. `cargo clippy -- -D warnings`
+3. `cargo clippy -- -D clippy::cognitive_complexity`
+
+## Style & Patterns
+- Default to `async` functions and blocks.
+- Follow the "Hub and Spoke" architectural pattern defined in `specs/C2OR_SPEC.md`.
+- Adhere strictly to the existing formatting and naming conventions.
