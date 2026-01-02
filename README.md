@@ -1,6 +1,6 @@
 # Parallax: The Sovereign LLM Proxy
 
-Parallax is a high-integrity, stateful Rust proxy designed to bridge **Cursor** and **OpenRouter/Google Gemini**. It solves common issues with streaming tool calls (like the "Gemini 400" error) and maintains a **Sovereign Conversation State** in a local SQLite database.
+Parallax is a high-integrity, stateful Rust proxy designed to bridge **Cursor** and **OpenRouter**. It solves common issues with streaming tool calls (like the "Gemini 400" error) and maintains a **Conversation State** in a local SQLite database.
 
 ## 🌟 Key Features
 
@@ -16,7 +16,7 @@ Parallax is a high-integrity, stateful Rust proxy designed to bridge **Cursor** 
 Currently, Parallax is built from source. Binaries will be available soon in GitHub Releases.
 
 ```bash
-git clone https://github.com/youruser/parallax.git
+git clone https://github.com/coljnr9/parallax.git
 cd parallax
 cargo build --release
 ```
@@ -33,14 +33,14 @@ cp .env.example .env
 Start the proxy. By default, it listens on `127.0.0.1:8080`.
 
 ```bash
-./target/release/parallax
+cargo run --release
 ```
 
 ### 4. Connect Cursor
 In Cursor settings (**Models > OpenAI API Key**):
 1. Set the **API Key** to any string (e.g., `parallax`).
 2. Set the **Base URL** to `http://127.0.0.1:8080/v1`.
-3. Enable the models you want to use via OpenRouter (e.g., `google/gemini-2.0-flash-001`).
+3. Enable the models you want to use via OpenRouter (e.g., `google/gemini-3-flash-preview`).
 
 ## ☁️ Advanced Connectivity (HTTPS Tunnels)
 
@@ -76,9 +76,8 @@ Persistent tunnels are much more stable and provide a permanent URL.
 Cursor's networking stack sometimes defaults to HTTP/2, which can cause issues with SSE (streaming) over certain tunnel providers or when connecting to local proxies.
 
 If you experience "connection lost" or streaming failures:
-- Go to Cursor **Settings > Advanced**.
-- Ensure **HTTP/2 Support** is turned **OFF**.
-- Restart Cursor.
+- Go to Cursor **Settings > Network**.
+- Set **HTTP Compatability Mode** to **HTTP/1.1**.
 
 ## 🛡️ Security & Privacy
 
