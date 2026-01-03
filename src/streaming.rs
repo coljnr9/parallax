@@ -73,14 +73,38 @@ impl StreamHandler {
     ) where
         R: Stream<Item = std::result::Result<Bytes, std::io::Error>> + Unpin + Send,
     {
+        tracing::info!("stream.start: Established upstream connection, beginning read loop");
+
         let mut accumulator = TurnAccumulator::new();
         let mut tool_index_map = HashMap::<u32, String>::new();
         let mut metrics = crate::logging::StreamMetric::new();
         let mut line_count = 0;
         let mut has_seen_tool_call = false;
         let mut buffered_pulses = Vec::new();
+        let mut first_upstream_line_at: Option<std::time::Instant> = None;
+        let mut first_client_send_at: Option<std::time::Instant> = None;
+        let mut last_activity_at = std::time::Instant::now();
+        let mut end_reason = "upstream_eof";
 
         while let Some(line_result) = lines_stream.next().await {
+            let now = std::time::Instant::now();
+            
+            if now.duration_since(last_activity_at) > std::time::Duration::from_secs(30) {
+                tracing::warn!(
+                    idle_secs = %now.duration_since(last_activity_at).as_secs(),
+                    lines = %line_count,
+                    "stream.idle_upstream: Long silence from provider"
+                );
+            }
+            
+            last_activity_at = now;
+
+            if first_upstream_line_at.is_none() {
+                let elapsed = start_time.elapsed().as_millis();
+                first_upstream_line_at = Some(now);
+                tracing::info!(t_first_line_ms = %elapsed, "stream.first_line: Received first chunk from upstream");
+            }
+
             line_count += 1;
 
             // Heartbeat every 50 lines if we are still buffering
@@ -121,10 +145,26 @@ impl StreamHandler {
             )
             .await;
 
-            if let Some(true) = should_break {
-                break;
+        if let Some(is_error) = should_break {
+            if is_error {
+                end_reason = "upstream_error";
+            } else {
+                end_reason = "finished_done_marker";
+            }
+            break;
+        }
+
+            if first_client_send_at.is_none() && !buffered_pulses.is_empty() {
+                first_client_send_at = Some(std::time::Instant::now());
+                tracing::debug!("stream.first_send: Forwarded first chunk to client");
             }
         }
+
+        if last_activity_at.elapsed() > std::time::Duration::from_secs(60) && end_reason == "upstream_eof" {
+            end_reason = "upstream_stalled_timeout";
+        }
+
+        tracing::info!(reason = %end_reason, lines = %line_count, "stream.end: Closing stream task");
 
         Self::finish_stream(
             &accumulator,
@@ -372,7 +412,7 @@ impl StreamHandler {
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" {
                         tracing::debug!("[☁️  -> ⚙️ ] Stream end marker [DONE] received");
-                        return Some(true);
+                        return Some(false); // Success, not an error
                     }
 
                     return Self::handle_provider_line(
@@ -394,8 +434,7 @@ impl StreamHandler {
                 }
             }
             Err(e) => {
-                Self::handle_line_error(e, tx).await;
-                return Some(true);
+                return Some(Self::handle_line_error(e, tx).await);
             }
         }
         None
@@ -404,17 +443,16 @@ impl StreamHandler {
     async fn handle_line_error(
         e: tokio_util::codec::LinesCodecError,
         tx: &mpsc::Sender<std::result::Result<axum::response::sse::Event, ParallaxError>>,
-    ) {
-        tracing::error!("[☁️  -> ⚙️ ] Line Parse Error: {}", e);
+    ) -> bool {
+        tracing::error!("stream.parse_error: {}", e);
         let io_err = match e {
             tokio_util::codec::LinesCodecError::Io(io) => io,
             tokio_util::codec::LinesCodecError::MaxLineLengthExceeded => {
                 std::io::Error::other("Max line length exceeded")
             }
         };
-        if tx.send(Err(ParallaxError::Io(io_err))).await.is_err() {
-            tracing::trace!("Client disconnected, stopping stream");
-        }
+        let _ = tx.send(Err(ParallaxError::Io(io_err))).await;
+        true
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -448,8 +486,7 @@ impl StreamHandler {
                     tools_were_advertised,
                     buffered_pulses,
                 )
-                .await;
-                None
+                .await
             }
             crate::types::LineEvent::Error(err) => {
                 let _ = state
@@ -745,10 +782,23 @@ impl StreamHandler {
         tx_tui: &tokio::sync::broadcast::Sender<crate::tui::TuiEvent>,
         tools_were_advertised: bool,
         buffered_pulses: &mut Vec<ProviderPulse>,
-    ) {
+    ) -> Option<bool> {
         metrics.record_chunk(&pulse);
 
+        // Detect transition: we only want to scrub once (first time tool calls show up)
+        let had_seen_tools_before = *has_seen_tool_call;
+        let this_pulse_has_tools = pulse.choices.iter().any(|c| c.delta.tool_calls.is_some());
+
         Self::sanitize_tool_calls(&mut pulse, has_seen_tool_call);
+
+        if !had_seen_tools_before && this_pulse_has_tools {
+            // We already buffered/accumulated earlier deltas for this turn.
+            // Scrub only explicit protocol leak patterns so we don't preserve "Assistant:" and
+            // "<xai:function_call ...>" into the final message history.
+            accumulator.text_buffer = crate::hardening::scrub_tool_protocol_leaks(&accumulator.text_buffer);
+            accumulator.thought_buffer =
+                crate::hardening::scrub_tool_protocol_leaks(&accumulator.thought_buffer);
+        }
 
         tracing::trace!("[☁️  -> ⚙️ ] Pulse: {:?}", pulse);
         Self::process_pulse(&pulse, conversation_id, tool_index_map, accumulator).await;
@@ -758,7 +808,7 @@ impl StreamHandler {
         // This is to allow for the diff-only guard to trigger if needed.
         if tools_were_advertised && !*has_seen_tool_call {
             buffered_pulses.push(pulse);
-            return;
+            return None;
         }
 
         // Send buffered pulses if this is the first tool call
@@ -770,7 +820,7 @@ impl StreamHandler {
                         .await
                         .is_err()
                     {
-                        break;
+                        return Some(false);
                     }
                 }
             }
@@ -779,13 +829,12 @@ impl StreamHandler {
         // Re-serialize the sanitized pulse
         if let Ok(sanitized_json) = serde_json::to_string(&pulse) {
             if tx
-                .send(Ok(
-                    axum::response::sse::Event::default().data(sanitized_json)
-                ))
+                .send(Ok(axum::response::sse::Event::default().data(sanitized_json)))
                 .await
                 .is_err()
             {
-                tracing::trace!("Client disconnected, stopping stream");
+                tracing::warn!("stream.send_failed: Client disconnected, stopping stream");
+                return Some(false);
             }
         }
         // Emit TUI StreamUpdate
@@ -833,6 +882,8 @@ impl StreamHandler {
                 }
             }
         }
+
+        None
     }
 
     async fn retry_with_diff_enforcement(
@@ -948,9 +999,17 @@ impl StreamHandler {
         if *has_seen_tool_call || pulse.choices.iter().any(|c| c.delta.tool_calls.is_some()) {
             *has_seen_tool_call = true;
             for choice in &mut pulse.choices {
+                // Rule 1: Shut Up and Run (content)
                 if choice.delta.content.is_some() {
                     choice.delta.content = None;
                 }
+
+                // Rule 1: Shut Up and Run (reasoning/thought)
+                // If tools are being called, leaked protocol strings in thought are actively harmful
+                // (they get preserved into history and trigger loop detection upstream).
+                let _ = choice.delta.extra.remove("thought");
+                let _ = choice.delta.extra.remove("reasoning");
+
                 if let Some(reason) = &choice.finish_reason {
                     if reason == "stop" {
                         choice.finish_reason = Some("tool_calls".to_string());

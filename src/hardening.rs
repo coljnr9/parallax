@@ -248,10 +248,56 @@ pub fn is_diff_like(text: &str) -> bool {
     false
 }
 
+/// Scrub known tool-protocol leakage patterns from assistant text/thought.
+/// Specifically targets xAI's <xai:function_call> markup and "Assistant:" boilerplate.
+pub fn scrub_tool_protocol_leaks(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+
+        // xAI tool-call markup leaking into model text/thought
+        if trimmed.starts_with("<xai:function_call") {
+            continue;
+        }
+
+        // Common boilerplate prefix that some models emit
+        if trimmed.starts_with("Assistant:") {
+            continue;
+        }
+
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    // Avoid changing semantics beyond removing those specific lines
+    out.trim_end().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_scrub_tool_protocol_leaks() {
+        let input = "Assistant: \n<xai:function_call name=\"read_file\">\nKeep this line.\n";
+        let got = scrub_tool_protocol_leaks(input);
+        assert_eq!(got, "Keep this line.");
+
+        let input_no_leaks = "This is a normal line.";
+        let got_no_leaks = scrub_tool_protocol_leaks(input_no_leaks);
+        assert_eq!(got_no_leaks, "This is a normal line.");
+
+        // Relaxed matching for lines starting with "Assistant:"
+        let input_relaxed = "Assistant: 1|# Terminus System Architecture\n<xai:function_call name=\"read_file\">";
+        let got_relaxed = scrub_tool_protocol_leaks(input_relaxed);
+        assert_eq!(got_relaxed, "");
+    }
 
     #[test]
     fn test_is_diff_like() {

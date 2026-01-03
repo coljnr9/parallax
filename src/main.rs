@@ -229,14 +229,26 @@ async fn replay_artifact(path: &str) -> Result<()> {
         tokens.completion = tracing::field::Empty,
         http.status = tracing::field::Empty,
         shim.outcome = tracing::field::Empty,
+        cf.ray = tracing::field::Empty,
+        cf.ip = tracing::field::Empty,
     )
 )]
 async fn chat_completions_handler(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
     let _start = std::time::Instant::now();
     let span = tracing::Span::current();
+
+    // Capture Cloudflare/Tunnel headers if present
+    if let Some(ray_id) = headers.get("cf-ray").and_then(|h| h.to_str().ok()) {
+        span.record("cf.ray", ray_id);
+        tracing::debug!("Request received via Cloudflare Ray: {}", ray_id);
+    }
+    if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|h| h.to_str().ok()) {
+        span.record("cf.ip", forwarded);
+    }
 
     if state.args.enable_debug_capture {
         crate::debug_utils::capture_debug_snapshot(
@@ -689,8 +701,22 @@ async fn handle_upstream_response(
     let disable_rescue = state.disable_rescue;
 
     let current_span = tracing::Span::current();
+    let _ = current_span;
     let state_clone = state.clone();
+    let rid_clone = request_id.clone();
+    let cid_clone = context.conversation_id.clone();
+    let model_clone = model_id.clone();
+
     tokio::spawn(async move {
+        let stream_id = uuid::Uuid::new_v4().to_string();
+        let stream_span = tracing::info_span!(
+            "stream",
+            rid = %rid_clone,
+            cid = %crate::str_utils::prefix_chars(&cid_clone, 6),
+            model = %model_clone,
+            stream_id = %stream_id
+        );
+
         StreamHandler::handle_stream(
             lines_stream,
             db,
@@ -705,7 +731,7 @@ async fn handle_upstream_response(
             tools_were_advertised,
             state_clone,
         )
-        .instrument(current_span)
+        .instrument(stream_span)
         .await;
     });
 
