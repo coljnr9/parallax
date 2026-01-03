@@ -1,15 +1,21 @@
-use tokio::sync::{mpsc, oneshot};
-use crate::types::{UpstreamHealth, Result};
 use crate::hardening::{CircuitBreaker, CircuitState};
 use crate::tui::TuiEvent;
+use crate::types::{Result, UpstreamHealth};
 use tokio::sync::broadcast;
+use tokio::sync::{mpsc, oneshot};
 
 pub enum KernelCommand {
-    UpdateHealth { success: bool },
-    CheckCircuit { resp: oneshot::Sender<Result<()>> },
+    UpdateHealth {
+        success: bool,
+    },
+    CheckCircuit {
+        resp: oneshot::Sender<Result<()>>,
+    },
     RecordCircuitSuccess,
     RecordCircuitFailure,
-    GetHealth { resp: oneshot::Sender<HealthSnapshot> },
+    GetHealth {
+        resp: oneshot::Sender<HealthSnapshot>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -67,9 +73,20 @@ impl Kernel {
                 }
                 KernelCommand::GetHealth { resp } => {
                     let snapshot = HealthSnapshot {
-                        consecutive_failures: self.health.consecutive_failures.load(std::sync::atomic::Ordering::Relaxed),
-                        total_requests: self.health.total_requests.load(std::sync::atomic::Ordering::Relaxed) as u32,
-                        failed_requests: self.health.failed_requests.load(std::sync::atomic::Ordering::Relaxed) as u32,
+                        consecutive_failures: self
+                            .health
+                            .consecutive_failures
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        total_requests: self
+                            .health
+                            .total_requests
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            as u32,
+                        failed_requests: self
+                            .health
+                            .failed_requests
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            as u32,
                         circuit_state: *self.circuit_breaker.state_raw_lock().await,
                     };
                     let _ = resp.send(snapshot);
@@ -80,11 +97,23 @@ impl Kernel {
 
     async fn emit_health_update(&self) {
         let _ = self.tx_tui.send(TuiEvent::UpstreamHealthUpdate {
-            consecutive_failures: self.health.consecutive_failures.load(std::sync::atomic::Ordering::Relaxed),
-            total_requests: self.health.total_requests.load(std::sync::atomic::Ordering::Relaxed),
-            failed_requests: self.health.failed_requests.load(std::sync::atomic::Ordering::Relaxed),
-            degraded: self.health.consecutive_failures.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            consecutive_failures: self
+                .health
+                .consecutive_failures
+                .load(std::sync::atomic::Ordering::Relaxed),
+            total_requests: self
+                .health
+                .total_requests
+                .load(std::sync::atomic::Ordering::Relaxed),
+            failed_requests: self
+                .health
+                .failed_requests
+                .load(std::sync::atomic::Ordering::Relaxed),
+            degraded: self
+                .health
+                .consecutive_failures
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0,
         });
     }
 }
-

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use thiserror::Error;
 use tracing_error::SpanTrace;
-use std::fmt;
 use uuid::Uuid;
 
 #[allow(dead_code)]
@@ -321,15 +321,17 @@ pub fn validate_history(history: &[TurnRecord]) -> Result<()> {
             }
             Some(prev) => {
                 // Check if transition is in the valid list
-                VALID_ROLE_TRANSITIONS.iter().any(|(p, c)| p == prev && c == &turn.role)
+                VALID_ROLE_TRANSITIONS
+                    .iter()
+                    .any(|(p, c)| p == prev && c == &turn.role)
             }
         };
 
         if !is_valid {
-            let prev_display = last_role
-                .as_ref()
-                .map(|r| format!("{:?}", r))
-                .unwrap_or_else(|| "None".to_string());
+            let prev_display = match &last_role {
+                Some(r) => format!("{:?}", r),
+                None => "None".to_string(),
+            };
             tracing::warn!(
                 "Invalid role transition detected: {} -> {:?}",
                 prev_display,
@@ -645,7 +647,10 @@ impl TurnAccumulator {
                     arguments_delta,
                     metadata,
                 } => {
-                    let id_str = id.clone().unwrap_or_else(|| "default".to_string());
+                    let id_str = match id {
+                        Some(s) => s.clone(),
+                        None => "default".to_string(),
+                    };
                     let entry = self
                         .tool_calls
                         .entry(id_str.clone())

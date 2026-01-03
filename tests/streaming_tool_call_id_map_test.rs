@@ -51,8 +51,11 @@ fn tool_call_arguments_are_preserved_when_id_missing_on_followup_chunk() {
         .collect::<Vec<_>>();
 
     assert_eq!(tool_calls.len(), 1);
-    let (id, name, args) = tool_calls.pop().unwrap();
-    assert_eq!(id, "call_abc");
-    assert_eq!(name, "read_file");
-    assert_eq!(args["target_file"], "/tmp/foo");
+    if let Some((id, name, args)) = tool_calls.pop() {
+        assert_eq!(id, "call_abc");
+        assert_eq!(name, "read_file");
+        assert_eq!(args["target_file"], "/tmp/foo");
+    } else {
+        assert!(false, "Expected one tool call");
+    }
 }

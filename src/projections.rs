@@ -1,3 +1,5 @@
+#![allow(clippy::manual_unwrap_or_default)]
+#![allow(clippy::manual_unwrap_or)]
 use crate::specs::openai::*;
 use crate::types::*;
 use std::collections::HashMap;
@@ -407,12 +409,20 @@ impl OpenRouterAdapter {
 
         OpenAiMessage::Assistant {
             content: final_content,
-            reasoning: if thoughts.is_empty() { None } else { Some(thoughts.join("\n")) },
+            reasoning: if thoughts.is_empty() {
+                None
+            } else {
+                Some(thoughts.join("\n"))
+            },
             tool_calls,
         }
     }
 
-    fn apply_gemini_fix(text_content: &str, flavor: &dyn ProviderFlavor, tool_calls: &[OpenAiToolCall]) -> Option<String> {
+    fn apply_gemini_fix(
+        text_content: &str,
+        flavor: &dyn ProviderFlavor,
+        tool_calls: &[OpenAiToolCall],
+    ) -> Option<String> {
         // GEMINI FIX: Gemini requires every message to have at least one "parts" field.
         // When an assistant message has tool calls but no text content, we must provide
         // at least an empty string to ensure OpenRouter can transform it into a valid
@@ -451,9 +461,7 @@ impl OpenRouterAdapter {
             None => {
                 let found = record.content.iter().find_map(|p| {
                     if let MessagePart::ToolResult {
-                        tool_call_id,
-                        name,
-                        ..
+                        tool_call_id, name, ..
                     } = p
                     {
                         Some((tool_call_id.clone(), name.clone()))
@@ -570,7 +578,7 @@ impl OpenRouterAdapter {
             .map(|v| v as u32);
         if is_thinking {
             // Force at least 64k tokens for thinking models to prevent cutoffs
-            let max_tokens_val = max_tokens.unwrap_or_default();
+            let max_tokens_val = if let Some(v) = max_tokens { v } else { 0 };
             if max_tokens_val < 64000 {
                 max_tokens = Some(64000);
             }

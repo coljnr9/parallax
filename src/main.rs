@@ -1,3 +1,6 @@
+#![allow(clippy::manual_unwrap_or_default)]
+#![allow(clippy::manual_unwrap_or)]
+
 use parallax::constants::{
     AGENT_KEYWORDS, ASK_KEYWORDS, DEBUG_KEYWORDS, OPENROUTER_CHAT_COMPLETIONS, PLAN_KEYWORDS,
 };
@@ -470,12 +473,14 @@ async fn process_turn(
                 .send(crate::kernel::KernelCommand::RecordCircuitSuccess)
                 .await;
 
-            let is_streaming: bool = outgoing_request.stream.unwrap_or(false);
-            let tools_were_advertised = outgoing_request
-                .tools
-                .as_ref()
-                .map(|t| !t.is_empty())
-                .unwrap_or(false);
+            let is_streaming: bool = match outgoing_request.stream {
+                Some(s) => s,
+                None => false,
+            };
+            let tools_were_advertised = match outgoing_request.tools.as_ref() {
+                Some(t) => !t.is_empty(),
+                None => false,
+            };
 
             if is_streaming {
                 handle_upstream_response(
@@ -679,8 +684,10 @@ async fn main() {
     // Setup Custom Logger that pipes to TUI
     use tracing_subscriber::prelude::*;
 
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "parallax=debug,parallax::tui=off,parallax::streaming=off".into());
+    let filter = match tracing_subscriber::EnvFilter::try_from_default_env() {
+        Ok(f) => f,
+        Err(_) => "parallax=debug,parallax::tui=off,parallax::streaming=off".into(),
+    };
 
     // Setup file logging
     let file_appender = tracing_appender::rolling::daily(".", "parallax.log");

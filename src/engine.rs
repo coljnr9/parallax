@@ -1,3 +1,5 @@
+#![allow(clippy::manual_unwrap_or_default)]
+#![allow(clippy::manual_unwrap_or)]
 use crate::db::DbPool;
 use crate::ingress::*;
 use crate::types::*;
@@ -77,9 +79,17 @@ impl ParallaxEngine {
             .into());
         }
 
-        let total_tool_calls: usize = context.history.iter().map(|record| {
-            record.content.iter().filter(|part| matches!(part, MessagePart::ToolCall { .. })).count()
-        }).sum();
+        let total_tool_calls: usize = context
+            .history
+            .iter()
+            .map(|record| {
+                record
+                    .content
+                    .iter()
+                    .filter(|part| matches!(part, MessagePart::ToolCall { .. }))
+                    .count()
+            })
+            .sum();
 
         if total_tool_calls > MAX_TOOL_CALLS_PER_REQUEST {
             return Err(ParallaxError::InvalidIngress(format!(
@@ -169,12 +179,19 @@ impl ParallaxEngine {
     fn coalesce_history(raw_records: Vec<TurnRecord>) -> Vec<TurnRecord> {
         let mut history: Vec<TurnRecord> = Vec::new();
         for rec in raw_records {
-            let should_coalesce = history.last().map(|last| {
-                last.role == rec.role && rec.role != Role::User && rec.role != Role::Tool
-            }).unwrap_or(false);
+            let should_coalesce = match history.last() {
+                Some(last) => {
+                    last.role == rec.role && rec.role != Role::User && rec.role != Role::Tool
+                }
+                None => false,
+            };
 
             if should_coalesce {
-                let last = history.last_mut().expect("Checked in should_coalesce");
+                let last = if let Some(l) = history.last_mut() {
+                    l
+                } else {
+                    panic!("Checked in should_coalesce")
+                };
                 last.content.extend(rec.content);
                 if last.tool_call_id.is_none() {
                     last.tool_call_id = rec.tool_call_id;
@@ -226,7 +243,10 @@ impl ParallaxEngine {
         conversation_id: &str,
         db: &DbPool,
     ) -> Result<TurnRecord> {
-        let role = raw_rec.role.unwrap_or(Role::User);
+        let role = match raw_rec.role {
+            Some(r) => r,
+            None => Role::User,
+        };
         let mut parts = Vec::new();
 
         // 1. Handle standard content parts
@@ -235,9 +255,11 @@ impl ParallaxEngine {
         }
 
         // 2. Handle legacy OpenAI function_call
-        if let (Some(name), Some(args), Some(id)) =
-            (raw_rec.name.as_ref(), raw_rec.arguments.as_ref(), raw_rec.call_id.as_ref())
-        {
+        if let (Some(name), Some(args), Some(id)) = (
+            raw_rec.name.as_ref(),
+            raw_rec.arguments.as_ref(),
+            raw_rec.call_id.as_ref(),
+        ) {
             let parsed_args = match crate::json_repair::repair_tool_call_arguments(name, args) {
                 Ok(val) => val,
                 Err(e) => {
@@ -293,15 +315,13 @@ impl ParallaxEngine {
         // 4. Handle legacy OpenAI function_call_output
         if role == Role::Tool {
             if let Some(call_id) = raw_rec.tool_call_id.clone().or(raw_rec.call_id.clone()) {
-                let content_str = raw_rec.output.unwrap_or_else(|| {
-                    parts.first().and_then(|p| {
-                        if let MessagePart::Text { content, .. } = p {
-                            Some(content.clone())
-                        } else {
-                            None
-                        }
-                    }).unwrap_or_default()
-                });
+                let content_str = match raw_rec.output {
+                    Some(o) => o,
+                    None => match parts.first() {
+                        Some(MessagePart::Text { content, .. }) => content.clone(),
+                        _ => String::new(),
+                    },
+                };
                 parts = vec![MessagePart::ToolResult {
                     tool_call_id: call_id,
                     content: content_str,
@@ -441,7 +461,7 @@ impl ParallaxEngine {
                 "[⚙️  -> ⚙️ ] Sticky Signature Saved for {}: {} bytes ({} reasoning tokens)",
                 tool_id,
                 sig_json.len(),
-                reasoning_tokens.unwrap_or(0)
+                if let Some(v) = reasoning_tokens { v } else { 0 }
             );
 
             sqlx::query("INSERT OR REPLACE INTO tool_signatures (id, conversation_id, signature, reasoning_tokens, thought_signature) VALUES (?1, ?2, ?3, ?4, ?5)")

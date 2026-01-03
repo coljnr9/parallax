@@ -42,7 +42,7 @@ impl<'de> Deserialize<'de> for ModelProvider {
     {
         let s = String::deserialize(deserializer)?;
         let lower = s.to_lowercase();
-        
+
         if GEMINI_PATTERNS.iter().any(|p| lower.contains(p)) {
             Ok(ModelProvider::Gemini(s))
         } else if ANTHROPIC_PATTERNS.iter().any(|p| lower.contains(p)) {

@@ -23,15 +23,13 @@ impl ToolSchema {
 
         let parameters = function.get("parameters")?;
         let properties = parameters.get("properties")?.as_object()?;
-        let required = parameters
-            .get("required")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let required = match parameters.get("required").and_then(|v| v.as_array()) {
+            Some(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
 
         let all_params: Vec<String> = properties.keys().cloned().collect();
         let optional_params: Vec<String> = all_params
@@ -89,16 +87,18 @@ impl ToolSchemaRegistry {
 
     /// Check if tool has required parameters
     pub fn has_required_params(&self, name: &str) -> bool {
-        self.get(name)
-            .map(|s| s.has_required_params)
-            .unwrap_or(false)
+        match self.get(name) {
+            Some(s) => s.has_required_params,
+            None => false,
+        }
     }
 
     /// Check if empty arguments are acceptable
     pub fn empty_args_acceptable(&self, name: &str) -> bool {
-        self.get(name)
-            .map(|s| s.empty_args_acceptable())
-            .unwrap_or(true) // Default to acceptable if unknown
+        match self.get(name) {
+            Some(s) => s.empty_args_acceptable(),
+            None => true, // Default to acceptable if unknown
+        }
     }
 }
 
@@ -131,7 +131,10 @@ mod tests {
             }
         });
 
-        let schema = ToolSchema::from_tool_definition(&tool).unwrap();
+        let schema = match ToolSchema::from_tool_definition(&tool) {
+            Some(s) => s,
+            None => panic!("Failed to parse tool schema"),
+        };
         assert_eq!(schema.name, "grep");
         assert_eq!(schema.required_params, vec!["pattern"]);
         assert_eq!(schema.optional_params, vec!["-A"]);
@@ -155,7 +158,10 @@ mod tests {
             }
         });
 
-        let schema = ToolSchema::from_tool_definition(&tool).unwrap();
+        let schema = match ToolSchema::from_tool_definition(&tool) {
+            Some(s) => s,
+            None => panic!("Failed to parse tool schema"),
+        };
         assert_eq!(schema.name, "list_mcp_resources");
         assert!(schema.required_params.is_empty());
         assert!(!schema.has_required_params);

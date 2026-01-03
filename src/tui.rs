@@ -333,7 +333,13 @@ impl AppState {
         }
     }
 
-    fn handle_log_message(&mut self, timestamp: String, level: String, target: String, message: String) {
+    fn handle_log_message(
+        &mut self,
+        timestamp: String,
+        level: String,
+        target: String,
+        message: String,
+    ) {
         let log_line = format!("{} [{}] {}: {}", timestamp, level, target, message);
         self.logs.push_back(log_line);
         if self.logs.len() > 1000 {
@@ -587,11 +593,7 @@ impl App {
         let header_text = if is_compact {
             format!(
                 " SHIM v1.0 | {:02}:{:02}:{:02} | ${:.4} | Act: {} ",
-                hours,
-                minutes,
-                seconds,
-                self.state.session_cost.0,
-                self.state.active_connections
+                hours, minutes, seconds, self.state.session_cost.0, self.state.active_connections
             )
         } else {
             format!(
@@ -1329,11 +1331,10 @@ impl App {
             let color = self.state.graph_state.get_model_color(model);
             let model_data = &self.state.graph_state.models[model];
 
-            let current_tps = model_data
-                .buckets
-                .back()
-                .map(|b| b.tps_completion)
-                .unwrap_or(0.0);
+            let current_tps = match model_data.buckets.back() {
+                Some(b) => b.tps_completion,
+                None => 0.0,
+            };
 
             let row = if area.width > 60 {
                 Row::new(vec![
@@ -1417,12 +1418,9 @@ impl App {
             f,
             area,
             " COMPLETION TPS ",
-            |model_data| {
-                model_data
-                    .buckets
-                    .back()
-                    .map(|b| b.tps_completion)
-                    .unwrap_or(0.0)
+            |model_data| match model_data.buckets.back() {
+                Some(b) => b.tps_completion,
+                None => 0.0,
             },
             true, // show current value
         );
@@ -2007,7 +2005,12 @@ mod graph_tests {
 
         // Add more buckets than window size
         for i in 0..5 {
-            graph_state.record_request_completion(&format!("model{}", i % 2), 100, LatencyMs(2000), CostUsd(0.01));
+            graph_state.record_request_completion(
+                &format!("model{}", i % 2),
+                100,
+                LatencyMs(2000),
+                CostUsd(0.01),
+            );
             std::thread::sleep(std::time::Duration::from_millis(1100));
         }
 

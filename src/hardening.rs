@@ -415,8 +415,14 @@ mod tests {
                 Some(s) => s,
                 None => panic!("'plan' is not a string"),
             };
-            assert!(!plan.contains("npm install"), "Should not contain 'npm install'");
-            assert!(!plan.contains("cargo build"), "Should not contain 'cargo build'");
+            assert!(
+                !plan.contains("npm install"),
+                "Should not contain 'npm install'"
+            );
+            assert!(
+                !plan.contains("cargo build"),
+                "Should not contain 'cargo build'"
+            );
             // Check that grep was replaced with ripgrep (not just removed)
             assert!(
                 plan.contains("ripgrep "),
