@@ -1,6 +1,7 @@
+use crate::str_utils;
+use crate::redaction::{redact_value, RedactionLevel};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::redaction::{redact_value, RedactionLevel};
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct FlightRecorder {
@@ -44,10 +45,11 @@ impl FlightRecorder {
         let mut error_info = serde_json::json!({
             "status": status.as_u16(),
             "classification": "unknown",
-            "body_snippet": body.chars().take(500).collect::<String>(),
+            "body_snippet": str_utils::prefix_chars(body, 500),
         });
 
-        if body.trim_start().starts_with("<!DOCTYPE html") || body.trim_start().starts_with("<html") {
+        if body.trim_start().starts_with("<!DOCTYPE html") || body.trim_start().starts_with("<html")
+        {
             error_info["classification"] = serde_json::json!("HTML/Cloudflare");
             if let Some(ray_id_idx) = body.find("CF-RAY:") {
                 let ray_id = match body[ray_id_idx..].split_whitespace().nth(1) {
@@ -57,7 +59,7 @@ impl FlightRecorder {
                             Some(prefix) => prefix,
                             None => id,
                         }
-                    },
+                    }
                     None => "unknown",
                 };
                 error_info["cf_ray"] = serde_json::json!(ray_id);
@@ -76,8 +78,11 @@ impl FlightRecorder {
             .map(|d| d.as_millis())
             .unwrap_or(0);
         let safe_model = self.model_id.replace("/", "_").replace(":", "_");
-        let safe_cid = self.conversation_id.chars().take(8).collect::<String>();
-        let filename = format!("debug_capture/{}_flight_{}_{}.json", timestamp, safe_cid, safe_model);
+        let safe_cid = str_utils::prefix_chars(&self.conversation_id, 8);
+        let filename = format!(
+            "debug_capture/{}_flight_{}_{}.json",
+            timestamp, safe_cid, safe_model
+        );
         ("debug_capture".to_string(), filename)
     }
 
@@ -135,7 +140,9 @@ impl FlightRecorder {
                 Err(_) => continue,
             };
             if metadata.is_file() {
-                let modified = metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                let modified = metadata
+                    .modified()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
                 entries.push((entry.path(), modified, metadata.len()));
             }
         }
@@ -266,15 +273,24 @@ pub fn log_response_choices(body: &Value) {
     }
 }
 
-pub async fn capture_debug_snapshot(label: &str, model_id: &str, conversation_id: &str, request_id: &str, payload: &Value) {
+pub async fn capture_debug_snapshot(
+    label: &str,
+    model_id: &str,
+    conversation_id: &str,
+    request_id: &str,
+    payload: &Value,
+) {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let safe_model = model_id.replace("/", "_").replace(":", "_");
-    let safe_cid = conversation_id.chars().take(8).collect::<String>();
-    let safe_rid = request_id.chars().take(8).collect::<String>();
-    let filename = format!("debug_capture/{}_{}_{}_{}_{}.json", timestamp, label, safe_cid, safe_rid, safe_model);
+    let safe_cid = str_utils::prefix_chars(conversation_id, 8);
+    let safe_rid = str_utils::prefix_chars(request_id, 8);
+    let filename = format!(
+        "debug_capture/{}_{}_{}_{}_{}.json",
+        timestamp, label, safe_cid, safe_rid, safe_model
+    );
 
     save_snapshot_to_disk(&filename, payload).await;
 }
@@ -309,15 +325,39 @@ fn summarize_json_inner(value: &Value, indent: usize) -> String {
                     // Special handling for the "messages" array to show first and last
                     if k == "messages"
                         && let Value::Array(arr) = v
-                            && arr.len() > 2 {
-                                let mut items = Vec::new();
-                                items.push(format!("{}{}", next_space, summarize_json_inner(&arr[0], indent + 1)));
-                                items.push(format!("{}(...{} more items skipped)", next_space, arr.len() - 2));
-                                items.push(format!("{}{}", next_space, summarize_json_inner(&arr[arr.len() - 1], indent + 1)));
-                                summarized_fields.push(format!("{}{}: [\n{}\n{}]", next_space, k, items.join(",\n"), next_space));
+                        && arr.len() > 2
+                    {
+                        let mut items = Vec::new();
+                                items.push(format!(
+                                    "{}{}",
+                                    next_space,
+                                    summarize_json_inner(&arr[0], indent + 1)
+                                ));
+                                items.push(format!(
+                                    "{}(...{} more items skipped)",
+                                    next_space,
+                                    arr.len() - 2
+                                ));
+                                items.push(format!(
+                                    "{}{}",
+                                    next_space,
+                                    summarize_json_inner(&arr[arr.len() - 1], indent + 1)
+                                ));
+                                summarized_fields.push(format!(
+                                    "{}{}: [\n{}\n{}]",
+                                    next_space,
+                                    k,
+                                    items.join(",\n"),
+                                    next_space
+                                ));
                                 continue;
-                            }
-                    summarized_fields.push(format!("{}{}: {}", next_space, k, summarize_json_inner(v, indent + 1)));
+                    }
+                    summarized_fields.push(format!(
+                        "{}{}: {}",
+                        next_space,
+                        k,
+                        summarize_json_inner(v, indent + 1)
+                    ));
                 }
                 format!("{{\n{}\n{}}}", summarized_fields.join(",\n"), space)
             }
@@ -329,11 +369,19 @@ fn summarize_json_inner(value: &Value, indent: usize) -> String {
                 let limit = 2;
                 let mut summarized_items = Vec::new();
                 for v in arr.iter().take(limit) {
-                    summarized_items.push(format!("{}{}", next_space, summarize_json_inner(v, indent + 1)));
+                    summarized_items.push(format!(
+                        "{}{}",
+                        next_space,
+                        summarize_json_inner(v, indent + 1)
+                    ));
                 }
-                
+
                 if arr.len() > limit {
-                     summarized_items.push(format!("{}(...{} more items)", next_space, arr.len() - limit));
+                    summarized_items.push(format!(
+                        "{}(...{} more items)",
+                        next_space,
+                        arr.len() - limit
+                    ));
                 }
 
                 format!("[\n{}\n{}]", summarized_items.join(",\n"), space)
@@ -341,7 +389,12 @@ fn summarize_json_inner(value: &Value, indent: usize) -> String {
         }
         Value::String(s) => {
             if s.len() > 60 {
-                format!("\"{}...{}\" ({} chars)", &s[..20].replace("\n", "\\n"), &s[s.len()-20..].replace("\n", "\\n"), s.len())
+                format!(
+                    "\"{}...{}\" ({} chars)",
+                    str_utils::prefix_chars(s, 20).replace("\n", "\\n"),
+                    str_utils::suffix_chars(s, 20).replace("\n", "\\n"),
+                    s.len()
+                )
             } else {
                 format!("\"{}\"", s.replace("\n", "\\n"))
             }
@@ -374,4 +427,3 @@ mod tests {
         assert!(summary.contains("config"));
     }
 }
-

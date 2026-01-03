@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 use tracing_error::SpanTrace;
+use std::fmt;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -13,7 +14,42 @@ pub struct UserId(pub String);
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ConversationId(pub String);
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct RequestId(pub String);
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct TurnId(pub Uuid);
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LatencyMs(pub u128);
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Tokens(pub u64);
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, PartialOrd)]
+pub struct CostUsd(pub f64);
+
+impl fmt::Display for CostUsd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:.4}", self.0)
+    }
+}
+
+impl fmt::Display for LatencyMs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Display for Tokens {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::time::Instant;
@@ -145,6 +181,30 @@ where
 
 pub type Result<T> = std::result::Result<T, ObservedError>;
 
+impl ConversationId {
+    pub fn short(&self) -> &str {
+        crate::str_utils::prefix_chars(&self.0, 6)
+    }
+}
+
+impl RequestId {
+    pub fn short(&self) -> &str {
+        crate::str_utils::prefix_chars(&self.0, 8)
+    }
+}
+
+impl From<String> for ConversationId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<String> for RequestId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
 impl ToolCallId {
     #[allow(dead_code)]
     pub fn new() -> Self {
@@ -219,15 +279,14 @@ pub fn validate_history(history: &[TurnRecord]) -> Result<()> {
             (Some(Role::Assistant), Role::User) | (Some(Role::Assistant), Role::Tool) => {}
             (Some(Role::Tool), Role::Tool) | (Some(Role::Tool), Role::Assistant) => {}
             (prev, current) => {
-                let prev_display = prev.map(|r| format!("{:?}", r)).unwrap_or_else(|| "None".to_string());
+                let prev_display = match prev {
+                    Some(r) => format!("{:?}", r),
+                    None => "None".to_string(),
+                };
                 tracing::warn!(
                     "Invalid role transition detected: {} -> {:?}",
                     prev_display, current
                 );
-                // We've decided NOT to panic or return hard error here to improve resilience,
-                // but we log it. If we want to be strict, we'd return Err, but let's 
-                // follow the plan of removing explicit panics and making it fail-safe.
-                // For now, we'll keep the Err but ensure it's handled upstream.
                 return Err(ParallaxError::Protocol(format!(
                     "Invalid role transition at message {}: {} -> {:?}",
                     i, prev_display, current
@@ -261,14 +320,12 @@ mod tests {
 
         let result = validate_history(&history);
         assert!(result.is_err());
-        if let Err(err) = result {
-            if let ParallaxError::Protocol(msg) = err.inner {
-                assert!(msg.contains("Invalid role transition"));
-            } else {
-                panic!("Expected Protocol error, got {:?}", err.inner);
-            }
-        } else {
-            panic!("Expected error result");
+        match result {
+            Err(err) => match err.inner {
+                ParallaxError::Protocol(msg) => assert!(msg.contains("Invalid role transition")),
+                _ => panic!("Expected Protocol error, got {:?}", err.inner),
+            },
+            Ok(_) => panic!("Expected error result"),
         }
     }
 
@@ -502,7 +559,10 @@ impl TurnAccumulator {
                 PulsePart::Text { delta } => self.text_buffer.push_str(&delta),
                 PulsePart::Thought { delta } => self.thought_buffer.push_str(&delta),
                 PulsePart::ToolCall { id, name, arguments_delta, metadata } => {
-                    let id_str = id.clone().unwrap_or_else(|| "default".to_string());
+                    let id_str = match id {
+                        Some(i) => i,
+                        None => "default".to_string(),
+                    };
                     let entry = self.tool_calls.entry(id_str.clone()).or_insert(ToolCallBuffer {
                         name: String::new(),
                         arguments: String::new(),

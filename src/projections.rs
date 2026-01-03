@@ -2,13 +2,26 @@ use crate::types::*;
 use crate::specs::openai::*;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    Google,
+    Anthropic,
+    OpenAi,
+    Standard,
+}
+
 pub trait ProviderFlavor: Send + Sync {
     fn requires_thought_signatures(&self) -> bool;
     fn name(&self) -> &'static str;
+    fn kind(&self) -> ProviderKind;
     #[allow(dead_code)]
-    fn supports_system_role(&self) -> bool { true }
+    fn supports_system_role(&self) -> bool {
+        true
+    }
     #[allow(dead_code)]
-    fn max_tokens_mandatory(&self) -> bool { false }
+    fn max_tokens_mandatory(&self) -> bool {
+        false
+    }
     fn stop_sequences(&self) -> Vec<String> {
         vec![
             "</tool_code>".to_string(),
@@ -21,28 +34,69 @@ pub trait ProviderFlavor: Send + Sync {
 
 pub struct GeminiFlavor;
 impl ProviderFlavor for GeminiFlavor {
-    fn requires_thought_signatures(&self) -> bool { true }
-    fn name(&self) -> &'static str { "google" }
+    fn requires_thought_signatures(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "google"
+    }
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Google
+    }
 }
 
 pub struct AnthropicFlavor;
 impl ProviderFlavor for AnthropicFlavor {
-    fn requires_thought_signatures(&self) -> bool { false }
-    fn name(&self) -> &'static str { "anthropic" }
-    fn supports_system_role(&self) -> bool { false } // System at root, not in messages
-    fn max_tokens_mandatory(&self) -> bool { true }
+    fn requires_thought_signatures(&self) -> bool {
+        false
+    }
+    fn name(&self) -> &'static str {
+        "anthropic"
+    }
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Anthropic
+    }
+    fn supports_system_role(&self) -> bool {
+        false
+    } // System at root, not in messages
+    fn max_tokens_mandatory(&self) -> bool {
+        true
+    }
 }
 
 pub struct OpenAiFlavor;
 impl ProviderFlavor for OpenAiFlavor {
-    fn requires_thought_signatures(&self) -> bool { false }
-    fn name(&self) -> &'static str { "openai" }
+    fn requires_thought_signatures(&self) -> bool {
+        false
+    }
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::OpenAi
+    }
 }
 
 pub struct StandardFlavor;
 impl ProviderFlavor for StandardFlavor {
-    fn requires_thought_signatures(&self) -> bool { false }
-    fn name(&self) -> &'static str { "standard" }
+    fn requires_thought_signatures(&self) -> bool {
+        false
+    }
+    fn name(&self) -> &'static str {
+        "standard"
+    }
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Standard
+    }
+}
+
+pub fn resolve_flavor_for_kind(kind: ProviderKind) -> Box<dyn ProviderFlavor> {
+    match kind {
+        ProviderKind::Google => Box::new(GeminiFlavor),
+        ProviderKind::Anthropic => Box::new(AnthropicFlavor),
+        ProviderKind::OpenAi => Box::new(OpenAiFlavor),
+        ProviderKind::Standard => Box::new(StandardFlavor),
+    }
 }
 
 pub struct OpenRouterAdapter;
@@ -87,10 +141,13 @@ impl OpenRouterAdapter {
         }
     }
 
-    fn prune_history_if_needed(context: &ConversationContext, flavor: &dyn ProviderFlavor) -> ConversationContext {
+    fn prune_history_if_needed(
+        context: &ConversationContext,
+        flavor: &dyn ProviderFlavor,
+    ) -> ConversationContext {
         let mut history = context.history.clone();
-        
-        if flavor.name() == "google" {
+
+        if flavor.kind() == ProviderKind::Google {
             let analysis = crate::history_pruning::HistoryDepthAnalysis::analyze(&history);
             if analysis.exceeds_google_limits() {
                 tracing::warn!(
@@ -112,7 +169,7 @@ impl OpenRouterAdapter {
                 );
             }
         }
-        
+
         // Create a modified context with pruned history
         let mut pruned_context = context.clone();
         pruned_context.history = history;
@@ -171,18 +228,26 @@ impl OpenRouterAdapter {
 
         for (i, record) in context.history.iter().enumerate() {
             let _is_last_turn = i == history_len - 1;
-            let is_cache_breakpoint = flavor.name() == "anthropic" && i > 0 && (i == history_len - 3 || i == history_len - 5);
+            let is_cache_breakpoint = flavor.kind() == ProviderKind::Anthropic
+                && i > 0
+                && (i == history_len - 3 || i == history_len - 5);
 
             let msg = match record.role {
                 Role::System | Role::Developer => Self::transform_system_message(record, flavor),
                 Role::User => Self::transform_user_message(record, flavor, is_cache_breakpoint),
-                Role::Assistant | Role::Model => Self::transform_assistant_message(record, flavor, db).await,
+                Role::Assistant | Role::Model => {
+                    Self::transform_assistant_message(record, flavor, db).await
+                }
                 Role::Tool => Self::transform_tool_message(record, context, is_cache_breakpoint),
             };
-            
+
             // Validation for Gemini: log if we're creating problematic messages
-            if flavor.name() == "google"
-                && let OpenAiMessage::Assistant { content: None, tool_calls, .. } = &msg
+            if flavor.kind() == ProviderKind::Google
+                && let OpenAiMessage::Assistant {
+                    content: None,
+                    tool_calls,
+                    ..
+                } = &msg
                 && !tool_calls.is_empty()
             {
                 tracing::warn!(
@@ -191,7 +256,7 @@ impl OpenRouterAdapter {
                     i
                 );
             }
-            
+
             messages.push(msg);
         }
         messages
@@ -200,7 +265,7 @@ impl OpenRouterAdapter {
     fn transform_system_message(record: &TurnRecord, flavor: &dyn ProviderFlavor) -> OpenAiMessage {
         OpenAiMessage::System {
             content: Self::content_to_text(&record.content),
-            cache_control: if flavor.name() == "anthropic" {
+            cache_control: if flavor.kind() == ProviderKind::Anthropic {
                 Some(serde_json::json!({ "type": "ephemeral" }))
             } else {
                 None
@@ -262,26 +327,43 @@ impl OpenRouterAdapter {
         let text_content = text_parts.join("\n");
 
         if tool_calls.is_empty()
-             && let Some(rescue) = crate::rescue::detect_xml_invoke(&text_content) {
-                 tracing::info!("[RESCUE-PROJECT] Converted XML in history to ToolCall: {}", rescue.name);
-                 tool_calls.push(OpenAiToolCall {
-                     id: rescue.tool_call["id"].as_str().and_then(|s| if s.is_empty() { None } else { Some(s) }).unwrap_or("gen_id").to_string(),
-                     r#type: "function".to_string(),
-                     function: OpenAiFunctionCall {
-                         name: rescue.name,
-                         arguments: rescue.tool_call["function"]["arguments"].as_str().and_then(|s| if s.is_empty() { None } else { Some(s) }).unwrap_or("{}").to_string(),
+             && let Some(rescue) = crate::rescue::detect_xml_invoke(&text_content)
+        {
+             tracing::info!("[RESCUE-PROJECT] Converted XML in history to ToolCall: {}", rescue.name);
+             tool_calls.push(OpenAiToolCall {
+                 id: match rescue.tool_call["id"].as_str() {
+                     Some(s) if !s.is_empty() => s.to_string(),
+                     _ => "gen_id".to_string(),
+                 },
+                 r#type: "function".to_string(),
+                 function: OpenAiFunctionCall {
+                     name: rescue.name,
+                     arguments: match rescue.tool_call["function"]["arguments"].as_str() {
+                         Some(s) if !s.is_empty() => s.to_string(),
+                         _ => "{}".to_string(),
                      },
-                     thought_signature: None,
-                     extra_content: None,
-                 });
+                 },
+                 thought_signature: None,
+                 extra_content: None,
+             });
         }
 
+        let final_content = Self::apply_gemini_fix(&text_content, flavor, &tool_calls);
+
+        OpenAiMessage::Assistant {
+            content: final_content,
+            reasoning: if thoughts.is_empty() { None } else { Some(thoughts.join("\n")) },
+            tool_calls,
+        }
+    }
+
+    fn apply_gemini_fix(text_content: &str, flavor: &dyn ProviderFlavor, tool_calls: &[OpenAiToolCall]) -> Option<String> {
         // GEMINI FIX: Gemini requires every message to have at least one "parts" field.
         // When an assistant message has tool calls but no text content, we must provide
         // at least an empty string to ensure OpenRouter can transform it into a valid
         // Gemini message with a parts array.
-        let final_content = if text_content.is_empty() {
-            if flavor.name() == "google" && !tool_calls.is_empty() {
+        if text_content.is_empty() {
+            if flavor.kind() == ProviderKind::Google && !tool_calls.is_empty() {
                 tracing::debug!(
                     "[GEMINI-COMPAT] Assistant message has tool_calls but no text content. \
                      Providing empty string to ensure valid Gemini parts field."
@@ -291,13 +373,7 @@ impl OpenRouterAdapter {
                 None
             }
         } else {
-            Some(text_content)
-        };
-
-        OpenAiMessage::Assistant {
-            content: final_content,
-            reasoning: if thoughts.is_empty() { None } else { Some(thoughts.join("\n")) },
-            tool_calls,
+            Some(text_content.to_string())
         }
     }
 
@@ -309,22 +385,48 @@ impl OpenRouterAdapter {
                 });
                 (id.clone(), name)
             }
-            None => record.content.iter().find_map(|p| {
-                if let MessagePart::ToolResult { tool_call_id, name, .. } = p { 
-                    Some((tool_call_id.clone(), name.clone())) 
-                } else { None }
-            }).unwrap_or_else(|| ("missing_id".to_string(), None)),
+            None => {
+                let found = record.content.iter().find_map(|p| {
+                    if let MessagePart::ToolResult {
+                        tool_call_id,
+                        name,
+                        ..
+                    } = p
+                    {
+                        Some((tool_call_id.clone(), name.clone()))
+                    } else {
+                        None
+                    }
+                });
+                match found {
+                    Some(pair) => pair,
+                    None => ("missing_id".to_string(), None),
+                }
+            }
         };
 
-        let final_name = name.unwrap_or_else(|| {
-            context.history.iter().find_map(|r| {
-                r.content.iter().find_map(|p| {
-                    if let MessagePart::ToolCall { id, name, .. } = p {
-                        if id == &tool_call_id { Some(name.clone()) } else { None }
-                    } else { None }
-                })
-            }).unwrap_or_else(|| "unknown_tool".to_string())
-        });
+        let final_name = match name {
+            Some(n) => n,
+            None => {
+                let found_in_history = context.history.iter().find_map(|r| {
+                    r.content.iter().find_map(|p| {
+                        if let MessagePart::ToolCall { id, name, .. } = p {
+                            if id == &tool_call_id {
+                                Some(name.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                });
+                match found_in_history {
+                    Some(n) => n,
+                    None => "unknown_tool".to_string(),
+                }
+            }
+        };
 
         OpenAiMessage::Tool {
             content: Self::content_to_text(&record.content),
@@ -401,7 +503,8 @@ impl OpenRouterAdapter {
             .map(|v| v as u32);
         if is_thinking {
             // Force at least 64k tokens for thinking models to prevent cutoffs
-            if max_tokens.unwrap_or(0) < 64000 {
+            let max_tokens_val = max_tokens.unwrap_or_default();
+        if max_tokens_val < 64000 {
                 max_tokens = Some(64000);
             }
         }

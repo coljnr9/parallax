@@ -163,11 +163,10 @@ fn sanitize_grep_args(args: &mut Value) {
 fn sanitize_plan_args(args: &mut Value) {
     if let Value::Object(map) = args {
         // Extract title first before any mutable borrows
-        let title = map.get("name")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("Implementation Plan")
-            .to_string();
+        let title = match map.get("name").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => "Implementation Plan".to_string(),
+        };
         
         // Ensure plan has a proper H1 title if missing
         if let Some(Value::String(plan)) = map.get_mut("plan") {
@@ -199,17 +198,17 @@ fn sanitize_plan_args(args: &mut Value) {
 }
 
 fn has_positive_value(map: &Map<String, Value>, key: &str) -> bool {
-    map.get(key)
-        .and_then(|v| v.as_u64())
-        .map(|v| v > 0)
-        .unwrap_or(false)
+    match map.get(key).and_then(|v| v.as_u64()) {
+        Some(v) => v > 0,
+        None => false,
+    }
 }
 
 fn is_zero(map: &Map<String, Value>, key: &str) -> bool {
-    map.get(key)
-        .and_then(|v| v.as_u64())
-        .map(|v| v == 0)
-        .unwrap_or(false)
+    match map.get(key).and_then(|v| v.as_u64()) {
+        Some(v) => v == 0,
+        None => false,
+    }
 }
 
 pub fn is_diff_like(text: &str) -> bool {
@@ -328,7 +327,14 @@ mod tests {
         sanitize_tool_call("create_plan", &mut args);
 
         if let Some(map) = args.as_object() {
-            let plan = map.get("plan").unwrap().as_str().unwrap();
+            let plan_val = match map.get("plan") {
+                Some(p) => p,
+                None => panic!("Missing 'plan' field"),
+            };
+            let plan = match plan_val.as_str() {
+                Some(s) => s,
+                None => panic!("'plan' is not a string"),
+            };
             assert!(plan.starts_with("# Implementation Plan"));
             assert!(plan.contains("This is a plan without a title"));
         } else {
@@ -346,7 +352,14 @@ mod tests {
         sanitize_tool_call("create_plan", &mut args);
 
         if let Some(map) = args.as_object() {
-            let plan = map.get("plan").unwrap().as_str().unwrap();
+            let plan_val = match map.get("plan") {
+                Some(p) => p,
+                None => panic!("Missing 'plan' field"),
+            };
+            let plan = match plan_val.as_str() {
+                Some(s) => s,
+                None => panic!("'plan' is not a string"),
+            };
             assert!(plan.starts_with("# My Custom Plan"));
             assert!(plan.contains("This plan should use the name field as title"));
         } else {
@@ -363,7 +376,14 @@ mod tests {
         sanitize_tool_call("create_plan", &mut args);
 
         if let Some(map) = args.as_object() {
-            let plan = map.get("plan").unwrap().as_str().unwrap();
+            let plan_val = match map.get("plan") {
+                Some(p) => p,
+                None => panic!("Missing 'plan' field"),
+            };
+            let plan = match plan_val.as_str() {
+                Some(s) => s,
+                None => panic!("'plan' is not a string"),
+            };
             assert!(plan.starts_with("# Existing Title"));
             assert!(plan.contains("This plan already has a title"));
         } else {
@@ -380,7 +400,14 @@ mod tests {
         sanitize_tool_call("create_plan", &mut args);
 
         if let Some(map) = args.as_object() {
-            let plan = map.get("plan").unwrap().as_str().unwrap();
+            let plan_val = match map.get("plan") {
+                Some(p) => p,
+                None => panic!("Missing 'plan' field"),
+            };
+            let plan = match plan_val.as_str() {
+                Some(s) => s,
+                None => panic!("'plan' is not a string"),
+            };
             assert!(!plan.contains("npm install"), "Should not contain 'npm install'");
             assert!(!plan.contains("cargo build"), "Should not contain 'cargo build'");
             // Check that grep was replaced with ripgrep (not just removed)

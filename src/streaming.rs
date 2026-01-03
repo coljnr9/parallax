@@ -37,7 +37,8 @@ impl StreamHandler {
             &finalized_turn_val,
         )
         .await;
-        Self::log_finalized_turn(finalized_turn, &usage.cloned(), start_time.elapsed());
+        let usage_owned = usage.cloned();
+        Self::log_finalized_turn(finalized_turn, &usage_owned, start_time.elapsed());
     }
 
     async fn persist_signatures(accumulator: &TurnAccumulator, conversation_id: &str, db: &DbPool) {
@@ -158,7 +159,10 @@ impl StreamHandler {
         let mut empty_arg_tools: Vec<(String, String)> = Vec::new();
         for part in &finalized_turn.content {
             if let crate::types::MessagePart::ToolCall { id, name, arguments, .. } = part {
-                let is_empty_object = arguments.as_object().is_some_and(|m| m.is_empty());
+                let is_empty_object = match arguments.as_object() {
+                    Some(m) => m.is_empty(),
+                    None => false,
+                };
                 if is_empty_object {
                     let suspicious = matches!(
                         name.as_str(),
@@ -453,7 +457,7 @@ impl StreamHandler {
         _request_id: String,
         tx_tui: tokio::sync::broadcast::Sender<crate::tui::TuiEvent>,
     ) {
-        let err_str: String = serde_json::to_string(err).unwrap_or_default();
+        let err_str = serde_json::to_string(err).unwrap_or_default();
         tracing::error!("[☁️  -> ⚙️ ] Stream Error: {}", err_str);
 
         // Classification & Retry Logic
@@ -625,8 +629,15 @@ impl StreamHandler {
             .map_err(ParallaxError::Network)?;
 
         if !response.status().is_success() {
-            let err_body = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(ParallaxError::Upstream(axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Retry/Fallback failed: {}", err_body)).into());
+            let err_body = match response.text().await {
+                Ok(t) => t,
+                Err(_) => "Unknown error (failed to read response text)".to_string(),
+            };
+            return Err(ParallaxError::Upstream(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Retry/Fallback failed: {}", err_body),
+            )
+            .into());
         }
 
         let bytes_stream = response.bytes_stream().map(|r| r.map_err(std::io::Error::other));
@@ -723,17 +734,16 @@ impl StreamHandler {
         }
         // Emit TUI StreamUpdate
         for choice in &pulse.choices {
-            let tool_call_desc = choice.delta.tool_calls.as_ref().and_then(|tcs| {
-                tcs.iter().find_map(|tc| {
-                    tc.function.as_ref().map(|f| {
-                        format!(
-                            "{}({})",
-                            f.name.as_deref().unwrap_or(""),
-                            f.arguments.as_deref().unwrap_or("")
-                        )
-                    })
-                })
-            });
+            let tool_call_desc = match choice.delta.tool_calls.as_ref() {
+                Some(tcs) => tcs.iter().find_map(|tc| {
+                    tc.function.as_ref().map(|f| format!(
+                        "{}({})",
+                        f.name.as_deref().unwrap_or_default(),
+                        f.arguments.as_deref().unwrap_or_default()
+                    ))
+                }),
+                None => None,
+            };
 
             if let Some(content) = &choice.delta.content
                 && !content.is_empty()
@@ -828,8 +838,15 @@ impl StreamHandler {
             .map_err(ParallaxError::Network)?;
 
         if !response.status().is_success() {
-            let err_body = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(ParallaxError::Upstream(axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Retry failed: {}", err_body)).into());
+            let err_body = match response.text().await {
+                Ok(t) => t,
+                Err(_) => "Unknown error (failed to read response text)".to_string(),
+            };
+            return Err(ParallaxError::Upstream(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Retry failed: {}", err_body),
+            )
+            .into());
         }
 
         let bytes_stream = response.bytes_stream().map(|r| r.map_err(std::io::Error::other));
@@ -927,23 +944,34 @@ impl StreamHandler {
             };
 
             if td.id.is_none() {
+                let name_present = match td.function.as_ref() {
+                    Some(f) => match &f.name {
+                        Some(n) => !n.is_empty(),
+                        None => false,
+                    },
+                    None => false,
+                };
+                let args_delta_len = match td.function.as_ref().and_then(|f| f.arguments.as_ref()) {
+                    Some(a) => a.len(),
+                    None => 0,
+                };
+
                 tracing::warn!(
                     "[STREAM] tool_call id missing; using {:?} (index={}, name_present={}, args_delta_len={})",
                     id_source,
                     td.index,
-                    td.function.as_ref().is_some_and(|f| f.name.as_ref().is_some_and(|n| !n.is_empty())),
-                    td.function.as_ref().and_then(|f| f.arguments.as_ref().map(|a| a.len())).unwrap_or(0),
+                    name_present,
+                    args_delta_len,
                 );
             }
 
             content.push(PulsePart::ToolCall {
                 id,
-                name: td.function.as_ref().and_then(|f| f.name.clone()),
-                arguments_delta: td
-                    .function
-                    .as_ref()
-                    .and_then(|f| f.arguments.clone())
-                    .unwrap_or_default(),
+                name: match td.function.as_ref() {
+                    Some(f) => f.name.clone(),
+                    None => None,
+                },
+                arguments_delta: td.function.as_ref().and_then(|f| f.arguments.clone()).unwrap_or_default(),
                 metadata: Some(serde_json::Value::Object(td.extra.clone())),
             });
         }
@@ -1065,10 +1093,10 @@ impl StreamHandler {
 
         let usage_str = match usage {
             Some(u) => {
-                let cache_str = u.prompt_tokens_details.as_ref()
-                    .and_then(|d| d.cached_tokens)
-                    .map(|c| format!(" ({} cached)", c))
-                    .unwrap_or_default();
+                let cache_str = match u.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens) {
+                    Some(c) => format!(" ({} cached)", c),
+                    None => String::new(),
+                };
                 format!("Prompt: {}{}, Completion: {}, Total: {}", 
                     u.prompt_tokens, cache_str, u.completion_tokens, u.total_tokens)
             }

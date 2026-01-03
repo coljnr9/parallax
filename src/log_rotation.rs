@@ -46,12 +46,16 @@ impl LogRotationManager {
         if metadata.len() > self.config.max_file_size {
             // Rotate the log file by renaming it with a timestamp
             let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
-            let rotated_name = format!(
-                "{}.{}",
-                latest_log.file_stem().unwrap_or_default().to_string_lossy(),
-                timestamp
-            );
-            let rotated_path = latest_log.parent().unwrap_or(log_dir).join(rotated_name);
+            let stem = match latest_log.file_stem() {
+                Some(s) => s.to_string_lossy(),
+                None => std::borrow::Cow::Borrowed(""),
+            };
+            let rotated_name = format!("{}.{}", stem, timestamp);
+            let parent = match latest_log.parent() {
+                Some(p) => p,
+                None => log_dir,
+            };
+            let rotated_path = parent.join(rotated_name);
 
             fs::rename(latest_log, &rotated_path)?;
         }
@@ -92,9 +96,14 @@ impl LogRotationManager {
 
         // Sort by modification time (oldest first)
         files.sort_by_key(|path| {
-            fs::metadata(path)
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            let metadata = match fs::metadata(path) {
+                Ok(m) => m,
+                Err(_) => return std::time::SystemTime::UNIX_EPOCH,
+            };
+            match metadata.modified() {
+                Ok(t) => t,
+                Err(_) => std::time::SystemTime::UNIX_EPOCH,
+            }
         });
 
         Ok(files)

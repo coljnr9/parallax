@@ -1,13 +1,17 @@
 #![allow(clippy::manual_unwrap_or, clippy::manual_unwrap_or_default)]
+use crate::str_utils;
 use crate::types::*;
+use ratatui::layout::Position;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap, Table, Row, Cell},
+    widgets::{
+        Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
+    },
 };
 use std::collections::{HashMap, VecDeque};
 use std::{io, time::Duration};
@@ -76,17 +80,17 @@ pub enum ActiveTab {
 
 #[allow(dead_code)]
 struct RequestRecord {
-    id: String,
-    cid: String,
+    id: RequestId,
+    cid: ConversationId,
     method: String,
     model: String,
     intent: Option<Intent>,
     content: String,
     status: Option<u16>,
-    latency_ms: Option<u128>,
+    latency: Option<LatencyMs>,
     usage: Option<Usage>,
-    actual_cost: Option<f64>,
-    potential_cost_no_cache: Option<f64>,
+    actual_cost: Option<CostUsd>,
+    potential_cost_no_cache: Option<CostUsd>,
     timestamp: std::time::Instant,
     active_tool: Option<String>,
     last_update: std::time::Instant,
@@ -97,14 +101,14 @@ pub struct AppState {
     active_tab: ActiveTab,
     requests: VecDeque<RequestRecord>,
     list_state: ListState,
-    active_request_id: Option<String>,
+    active_request_id: Option<RequestId>,
     logs: VecDeque<String>,
     server_uptime: u64,
     active_connections: usize,
     total_requests: usize,
-    session_cost: f64,
+    session_cost: CostUsd,
     start_time: std::time::Instant,
-    model_costs: HashMap<String, f64>,
+    model_costs: HashMap<String, CostUsd>,
     tick: u64,
     should_quit: bool,
     upstream_health: Option<UpstreamHealthDisplay>,
@@ -120,18 +124,18 @@ struct UpstreamHealthDisplay {
 }
 
 struct MatrixDrop {
-    x: u16,         // Horizontal column index
-    y: f32,         // Vertical position (float for smooth speed handling)
-    speed: f32,     // How many cells to drop per tick
-    length: usize,  // Number of characters in the tail
+    x: u16,           // Horizontal column index
+    y: f32,           // Vertical position (float for smooth speed handling)
+    speed: f32,       // How many cells to drop per tick
+    length: usize,    // Number of characters in the tail
     chars: Vec<char>, // The actual characters being displayed
 }
 
 struct MatrixEffect {
     drops: Vec<MatrixDrop>,
-    width: u16,     // Cache width to detect terminal resizes
+    width: u16, // Cache width to detect terminal resizes
     rng: fastrand::Rng,
-    level: u8,      // 0: Off, 1: Sparse, 2: Medium, 3: Heavy
+    level: u8, // 0: Off, 1: Sparse, 2: Medium, 3: Heavy
 }
 
 #[derive(Debug, Clone)]
@@ -167,7 +171,7 @@ impl AppState {
             server_uptime: 0,
             active_connections: 0,
             total_requests: 0,
-            session_cost: 0.0,
+            session_cost: CostUsd(0.0),
             start_time: std::time::Instant::now(),
             model_costs: HashMap::new(),
             tick: 0,
@@ -180,115 +184,59 @@ impl AppState {
 
     fn handle_event(&mut self, event: TuiEvent) {
         match event {
-            TuiEvent::UpstreamHealthUpdate { consecutive_failures, total_requests, failed_requests, degraded } => {
-                self.upstream_health = Some(UpstreamHealthDisplay {
-                    consecutive_failures,
-                    total_requests,
-                    failed_requests,
-                    degraded,
-                });
-            }
+            TuiEvent::UpstreamHealthUpdate {
+                consecutive_failures,
+                total_requests,
+                failed_requests,
+                degraded,
+            } => self.handle_upstream_health_update(
+                consecutive_failures,
+                total_requests,
+                failed_requests,
+                degraded,
+            ),
             TuiEvent::RequestStarted {
                 id,
                 cid,
                 method,
                 model,
                 intent,
-            } => {
-                // If we already have a record for this CID, update it. Otherwise, create one.
-                if let Some(req) = self.requests.iter_mut().find(|r| r.cid == cid) {
-                    req.id = id.clone(); // Update to the latest request ID
-                    req.model = model;
-                    req.intent = intent;
-                    req.method = method;
-                    req.last_update = std::time::Instant::now();
-                    req.active_tool = None;
-                    req.status = None; // Reset status for the new request
-                } else {
-                    self.requests.push_back(RequestRecord {
-                        id: id.clone(),
-                        cid,
-                        method,
-                        model,
-                        intent,
-                        content: String::new(),
-                        status: None,
-                        latency_ms: None,
-                        usage: None,
-                        actual_cost: None,
-                        potential_cost_no_cache: None,
-                        timestamp: std::time::Instant::now(),
-                        active_tool: None,
-                        last_update: std::time::Instant::now(),
-                        recorded_in_graphs: false,
-                    });
-                }
-                
-                if self.requests.len() > 50 {
-                    self.requests.pop_front();
-                }
-                self.total_requests += 1;
-                self.active_connections += 1;
-
-                if self.active_request_id.is_none() {
-                    self.active_request_id = Some(id);
-                }
-            }
+            } => self.handle_request_started(
+                RequestId(id),
+                ConversationId(cid),
+                method,
+                model,
+                intent,
+            ),
             TuiEvent::StreamUpdate {
                 id,
                 content_delta,
                 tool_call,
-            } => {
-                // Look for the record by request ID or CID if needed, 
-                // but since RequestRecord now stores the LATEST request ID, this works.
-                if let Some(req) = self.requests.iter_mut().find(|r| r.id == id) {
-                    req.content.push_str(&content_delta);
-                    req.last_update = std::time::Instant::now();
-                    if let Some(tc) = tool_call {
-                        req.active_tool = Some(tc);
-                    }
-                }
-            }
+            } => self.handle_stream_update(RequestId(id), content_delta, tool_call),
             TuiEvent::RequestFinished {
                 id,
                 status,
                 latency_ms,
-            } => {
-                if let Some(req) = self.requests.iter_mut().find(|r| r.id == id) {
-                    req.status = Some(status);
-                    req.latency_ms = Some(latency_ms);
-                }
-                if self.active_connections > 0 {
-                    self.active_connections -= 1;
-                }
-            }
+            } => self.handle_request_finished(RequestId(id), status, LatencyMs(latency_ms)),
             TuiEvent::LogMessage {
                 timestamp,
                 level,
                 target,
                 message,
-            } => {
-                let log_line = format!("{} [{}] {}: {}", timestamp, level, target, message);
-                self.logs.push_back(log_line);
-                if self.logs.len() > 1000 {
-                    self.logs.pop_front();
-                }
-            }
+            } => self.handle_log_message(timestamp, level, target, message),
             TuiEvent::CostUpdate {
                 id,
                 model,
                 usage,
                 actual_cost,
                 potential_cost_no_cache,
-            } => {
-                if let Some(req) = self.requests.iter_mut().find(|r| r.id == id) {
-                    req.usage = Some(usage);
-                    req.actual_cost = Some(actual_cost);
-                    req.potential_cost_no_cache = Some(potential_cost_no_cache);
-                }
-                self.session_cost += actual_cost;
-                *self.model_costs.entry(model).or_insert(0.0) += actual_cost;
-            }
+            } => self.handle_cost_update(
+                RequestId(id),
+                model,
+                usage,
+                CostUsd(actual_cost),
+                CostUsd(potential_cost_no_cache),
+            ),
             TuiEvent::ServerPulse {
                 uptime_secs,
                 active_connections: _,
@@ -296,6 +244,119 @@ impl AppState {
                 self.server_uptime = uptime_secs;
             }
         }
+    }
+
+    fn handle_upstream_health_update(
+        &mut self,
+        consecutive_failures: u32,
+        total_requests: u64,
+        failed_requests: u64,
+        degraded: bool,
+    ) {
+        self.upstream_health = Some(UpstreamHealthDisplay {
+            consecutive_failures,
+            total_requests,
+            failed_requests,
+            degraded,
+        });
+    }
+
+    fn handle_request_started(
+        &mut self,
+        id: RequestId,
+        cid: ConversationId,
+        method: String,
+        model: String,
+        intent: Option<Intent>,
+    ) {
+        // If we already have a record for this CID, update it. Otherwise, create one.
+        if let Some(req) = self.requests.iter_mut().find(|r| r.cid == cid) {
+            req.id = id.clone(); // Update to the latest request ID
+            req.model = model;
+            req.intent = intent;
+            req.method = method;
+            req.last_update = std::time::Instant::now();
+            req.active_tool = None;
+            req.status = None; // Reset status for the new request
+        } else {
+            self.requests.push_back(RequestRecord {
+                id: id.clone(),
+                cid,
+                method,
+                model,
+                intent,
+                content: String::new(),
+                status: None,
+                latency: None,
+                usage: None,
+                actual_cost: None,
+                potential_cost_no_cache: None,
+                timestamp: std::time::Instant::now(),
+                active_tool: None,
+                last_update: std::time::Instant::now(),
+                recorded_in_graphs: false,
+            });
+        }
+
+        if self.requests.len() > 50 {
+            self.requests.pop_front();
+        }
+        self.total_requests += 1;
+        self.active_connections += 1;
+
+        if self.active_request_id.is_none() {
+            self.active_request_id = Some(id);
+        }
+    }
+
+    fn handle_stream_update(
+        &mut self,
+        id: RequestId,
+        content_delta: String,
+        tool_call: Option<String>,
+    ) {
+        if let Some(req) = self.requests.iter_mut().find(|r| r.id == id) {
+            req.content.push_str(&content_delta);
+            req.last_update = std::time::Instant::now();
+            if let Some(tc) = tool_call {
+                req.active_tool = Some(tc);
+            }
+        }
+    }
+
+    fn handle_request_finished(&mut self, id: RequestId, status: u16, latency: LatencyMs) {
+        if let Some(req) = self.requests.iter_mut().find(|r| r.id == id) {
+            req.status = Some(status);
+            req.latency = Some(latency);
+        }
+        if self.active_connections > 0 {
+            self.active_connections -= 1;
+        }
+    }
+
+    fn handle_log_message(&mut self, timestamp: String, level: String, target: String, message: String) {
+        let log_line = format!("{} [{}] {}: {}", timestamp, level, target, message);
+        self.logs.push_back(log_line);
+        if self.logs.len() > 1000 {
+            self.logs.pop_front();
+        }
+    }
+
+    fn handle_cost_update(
+        &mut self,
+        id: RequestId,
+        model: String,
+        usage: Usage,
+        actual_cost: CostUsd,
+        potential_cost_no_cache: CostUsd,
+    ) {
+        if let Some(req) = self.requests.iter_mut().find(|r| r.id == id) {
+            req.usage = Some(usage);
+            req.actual_cost = Some(actual_cost);
+            req.potential_cost_no_cache = Some(potential_cost_no_cache);
+        }
+        self.session_cost.0 += actual_cost.0;
+        self.model_costs.entry(model).or_insert(CostUsd(0.0)).0 += actual_cost.0;
     }
 
     fn select_down(&mut self) {
@@ -373,16 +434,17 @@ impl AppState {
                 && req.status.is_some()
                 && req.usage.is_some()
                 && req.actual_cost.is_some()
-                && req.latency_ms.is_some()
-                && let (Some(usage), Some(latency), Some(cost)) = (&req.usage, req.latency_ms, req.actual_cost)
+                && req.latency.is_some()
+                && let (Some(usage), Some(latency), Some(cost)) =
+                    (&req.usage, req.latency, req.actual_cost)
             {
-                self.graph_state.record_request_completion(
-                    &req.model,
-                    usage.completion_tokens,
-                    latency,
-                    cost,
-                );
-                req.recorded_in_graphs = true;
+                    self.graph_state.record_request_completion(
+                        &req.model,
+                        usage.completion_tokens,
+                        latency,
+                        cost,
+                    );
+                    req.recorded_in_graphs = true;
             }
         }
     }
@@ -429,13 +491,13 @@ impl App {
                             KeyCode::Char('2') => self.state.active_tab = ActiveTab::StreamFocus,
                             KeyCode::Char('3') => self.state.active_tab = ActiveTab::Console,
                             KeyCode::Char('4') => self.state.active_tab = ActiveTab::Graphs,
-                            
+
                             // Vim keybindings for grid navigation
                             KeyCode::Char('k') | KeyCode::Up => self.state.select_up(),
                             KeyCode::Char('j') | KeyCode::Down => self.state.select_down(),
                             KeyCode::Char('h') | KeyCode::Left => self.state.select_left(),
                             KeyCode::Char('l') | KeyCode::Right => self.state.select_right(),
-                            
+
                             KeyCode::Enter => self.state.focus_selected(),
                             KeyCode::Esc => self.state.active_tab = ActiveTab::FlightDeck,
                             _ => {}
@@ -472,7 +534,7 @@ impl App {
 
     fn render(&mut self, f: &mut Frame) {
         self.state.matrix_effect.render(f);
-        
+
         if f.area().width < 75 {
             self.render_size_warning(f, f.area());
             return;
@@ -523,8 +585,10 @@ impl App {
         let header_text = if is_compact {
             format!(
                 " SHIM v1.0 | {:02}:{:02}:{:02} | ${:.4} | Act: {} ",
-                hours, minutes, seconds,
-                self.state.session_cost,
+                hours,
+                minutes,
+                seconds,
+                self.state.session_cost.0,
                 self.state.active_connections
             )
         } else {
@@ -532,14 +596,15 @@ impl App {
                 " SHIM v1.0  [●] ONLINE  |  Session: {:02}:{:02}:{:02}  |  {:.1}k Toks / ${:.4}  |  Active: {} ",
                 hours, minutes, seconds,
                 self.state.total_requests as f64 * 0.45, // Approximation
-                self.state.session_cost,
+                self.state.session_cost.0,
                 self.state.active_connections
             )
         };
 
-        let mut header_spans = vec![
-            Span::styled(header_text, Style::default().add_modifier(Modifier::BOLD)),
-        ];
+        let mut header_spans = vec![Span::styled(
+            header_text,
+            Style::default().add_modifier(Modifier::BOLD),
+        )];
 
         if let Some(health) = &self.state.upstream_health {
             let health_color = if health.consecutive_failures > 0 || health.degraded {
@@ -548,38 +613,42 @@ impl App {
                 Color::Green
             };
             let success_rate = if health.total_requests > 0 {
-                (health.total_requests - health.failed_requests) as f64 / health.total_requests as f64 * 100.0
+                (health.total_requests - health.failed_requests) as f64
+                    / health.total_requests as f64
+                    * 100.0
             } else {
                 100.0
             };
 
             let health_text = if is_compact {
-                format!(" | UP: {:.0}% ({}) ", success_rate, health.consecutive_failures)
+                format!(
+                    " | UP: {:.0}% ({}) ",
+                    success_rate, health.consecutive_failures
+                )
             } else {
-                format!(" | UPSTREAM: {:.1}% ({}) ", success_rate, health.consecutive_failures)
+                format!(
+                    " | UPSTREAM: {:.1}% ({}) ",
+                    success_rate, health.consecutive_failures
+                )
             };
 
             header_spans.push(Span::styled(
                 health_text,
-                Style::default().fg(health_color).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(health_color)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
 
-        let header = Paragraph::new(Line::from(header_spans)).style(
-            Style::default()
-                .bg(Color::White)
-                .fg(Color::Black)
-        );
+        let header = Paragraph::new(Line::from(header_spans))
+            .style(Style::default().bg(Color::White).fg(Color::Black));
         f.render_widget(header, area);
     }
 
     fn render_header_middle(&self, f: &mut Frame, area: Rect, is_compact: bool) {
         let nav_layout = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(40),
-                Constraint::Percentage(60),
-            ])
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(area);
 
         self.render_tab_navigation(f, nav_layout[0], is_compact);
@@ -588,10 +657,20 @@ impl App {
 
     fn render_tab_navigation(&self, f: &mut Frame, area: Rect, is_compact: bool) {
         let tabs = vec![
-            Span::raw(if is_compact { " TABS: " } else { " TAB NAVIGATION:  " }),
+            Span::raw(if is_compact {
+                " TABS: "
+            } else {
+                " TAB NAVIGATION:  "
+            }),
             self.render_tab_item("[1] VIEW", "[1]", "GRID", ActiveTab::FlightDeck, is_compact),
             Span::raw("  "),
-            self.render_tab_item("[2] FOCUS", "[2]", "STREAM", ActiveTab::StreamFocus, is_compact),
+            self.render_tab_item(
+                "[2] FOCUS",
+                "[2]",
+                "STREAM",
+                ActiveTab::StreamFocus,
+                is_compact,
+            ),
             Span::raw("  "),
             self.render_tab_item("[3] SYSTEM", "[3]", "LOGS", ActiveTab::Console, is_compact),
             Span::raw("  "),
@@ -600,26 +679,28 @@ impl App {
         f.render_widget(Paragraph::new(Line::from(tabs)), area);
     }
 
-    fn render_tab_item(&self, full_label: &str, compact_label: &str, tab_name: &str, tab: ActiveTab, is_compact: bool) -> Span<'_> {
+    fn render_tab_item(
+        &self,
+        full_label: &str,
+        compact_label: &str,
+        tab_name: &str,
+        tab: ActiveTab,
+        is_compact: bool,
+    ) -> Span<'_> {
         let (label, is_active) = if is_compact {
             (compact_label, self.state.active_tab == tab)
         } else {
             (full_label, self.state.active_tab == tab)
         };
 
-        let tab_text = format!(
-            "{}{}{}",
-            label,
-            tab_name,
-            if is_active { "*" } else { "" }
-        );
+        let tab_text = format!("{}{}{}", label, tab_name, if is_active { "*" } else { "" });
 
         if is_active {
             Span::styled(
                 tab_text,
                 Style::default()
                     .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+                    .add_modifier(Modifier::BOLD),
             )
         } else {
             Span::styled(tab_text, Style::default())
@@ -641,15 +722,15 @@ impl App {
             if now.duration_since(req.timestamp).as_secs() > 300 {
                 continue;
             }
-            if let (Some(usage), Some(latency)) = (&req.usage, req.latency_ms)
-                && latency > 0
+            if let (Some(usage), Some(latency)) = (&req.usage, req.latency)
+                && latency.0 > 0
             {
                 let entry = model_stats.entry(req.model.clone()).or_default();
                 entry.0 += usage.completion_tokens as u64;
-                entry.1 += latency;
+                entry.1 += latency.0;
 
                 total_tokens += usage.completion_tokens as u64;
-                total_time += latency;
+                total_time += latency.0;
             }
         }
 
@@ -659,18 +740,21 @@ impl App {
             0.0
         };
 
-        let mut tps_data: Vec<(String, f64)> = model_stats.into_iter()
+        let mut tps_data: Vec<(String, f64)> = model_stats
+            .into_iter()
             .map(|(model, (tokens, ms))| {
-                let tps = if ms > 0 { (tokens as f64 / ms as f64) * 1000.0 } else { 0.0 };
+                let tps = if ms > 0 {
+                    (tokens as f64 / ms as f64) * 1000.0
+                } else {
+                    0.0
+                };
                 (model, tps)
             })
             .collect();
-        
-        tps_data.sort_by(|a, b| {
-            match b.1.partial_cmp(&a.1) {
-                Some(ord) => ord,
-                None => std::cmp::Ordering::Equal,
-            }
+
+        tps_data.sort_by(|a, b| match b.1.partial_cmp(&a.1) {
+            Some(ord) => ord,
+            None => std::cmp::Ordering::Equal,
         });
 
         let first_tps = match tps_data.first() {
@@ -678,9 +762,12 @@ impl App {
             None => 1.0,
         };
         let max_tps = first_tps.max(1.0);
-        
+
         let mut stat_spans = vec![
-            Span::styled(format!(" AVG TPS: {:.1} ", system_tps), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" AVG TPS: {:.1} ", system_tps),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::raw("| "),
         ];
 
@@ -692,17 +779,17 @@ impl App {
                 Some(name) => name,
                 None => model,
             };
-            let short_name = if simple_name.len() > 10 { &simple_name[..10] } else { simple_name };
-            
+            let short_name = str_utils::prefix_chars(simple_name, 10);
+
             stat_spans.push(Span::styled(
                 format!("{}: {} ", short_name, bar),
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(Color::Cyan),
             ));
         }
 
         f.render_widget(
             Paragraph::new(Line::from(stat_spans)).alignment(Alignment::Right),
-            area
+            area,
         );
     }
 
@@ -753,14 +840,17 @@ impl App {
         // If we have fewer than 12, they fill from the first slot.
         // If we have more than 12, we show the 12 most recent ones.
         let num_to_take = self.state.requests.len().min(12);
-        let display_reqs: Vec<_> = self.state.requests.iter()
+        let display_reqs: Vec<_> = self
+            .state
+            .requests
+            .iter()
             .rev() // Get newest first
             .take(num_to_take)
             .collect();
 
         for i in 0..12 {
             let slot_area = slots[i];
-            
+
             if i < display_reqs.len() {
                 let req = display_reqs[i];
                 let is_selected = self.state.list_state.selected() == Some(i);
@@ -782,13 +872,23 @@ impl App {
 
                 let last_update_ms = req.last_update.elapsed().as_millis();
                 let is_streaming = req.status.is_none();
-                
+
                 let heartbeat_icon = if is_streaming {
-                    if last_update_ms < 150 { "●" } else if last_update_ms < 400 { "○" } else { " " }
-                } else { " " };
-                
+                    if last_update_ms < 150 {
+                        "●"
+                    } else if last_update_ms < 400 {
+                        "○"
+                    } else {
+                        " "
+                    }
+                } else {
+                    " "
+                };
+
                 let heartbeat_style = if last_update_ms < 150 {
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
@@ -801,43 +901,63 @@ impl App {
                     }
                 } else {
                     let spinner = match (self.state.tick / 10) % 4 {
-                        0 => "/", 1 => "-", 2 => "\\", _ => "|",
+                        0 => "/",
+                        1 => "-",
+                        2 => "\\",
+                        _ => "|",
                     };
-                    Span::styled(format!("{} STRM", spinner), Style::default().fg(Color::Yellow))
+                    Span::styled(
+                        format!("{} STRM", spinner),
+                        Style::default().fg(Color::Yellow),
+                    )
                 };
 
                 let cost_cents = match req.actual_cost {
-                    Some(c) => c * 100.0,
+                    Some(c) => c.0 * 100.0,
                     None => 0.0,
                 };
                 let savings_cents = match (req.actual_cost, req.potential_cost_no_cache) {
-                    (Some(actual), Some(potential)) => (potential - actual) * 100.0,
+                    (Some(actual), Some(potential)) => (potential.0 - actual.0) * 100.0,
                     _ => 0.0,
                 };
-                
+
                 // Color cost based on efficiency (just an example: if it's very cheap/cached, make it brighter)
-                let cost_color = if cost_cents < 0.5 { Color::LightCyan } else { Color::Green };
-                
+                let cost_color = if cost_cents < 0.5 {
+                    Color::LightCyan
+                } else {
+                    Color::Green
+                };
+
                 let cost_display = if savings_cents > 0.01 {
                     format!("{:.1}¢ ({:.1}¢)", cost_cents, savings_cents)
                 } else {
                     format!("{:.1}¢", cost_cents)
                 };
-                
-                let time_text = match req.latency_ms {
-                    Some(l) => format!("{:.1}s", l as f64 / 1000.0),
+
+                let time_text = match req.latency {
+                    Some(l) => format!("{:.1}s", l.0 as f64 / 1000.0),
                     None => format!("{:.1}s", req.timestamp.elapsed().as_secs_f64()),
                 };
 
                 let block = Block::default()
                     .borders(Borders::ALL)
                     .border_type(border_type)
-                    .border_style(if is_selected { Style::default().fg(Color::White) } else { Style::default().fg(border_color) })
+                    .border_style(if is_selected {
+                        Style::default().fg(Color::White)
+                    } else {
+                        Style::default().fg(border_color)
+                    })
                     .bg(Color::Black)
                     .title_alignment(Alignment::Left)
                     .title(Line::from(vec![
-                        Span::styled(format!(" #{} ", &req.cid[..6.min(req.cid.len())]), Style::default().add_modifier(Modifier::BOLD)),
-                        Span::styled(format!(" {} ", req.model.to_uppercase()), Style::default().add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            format!(" #{} ", req.cid.short()),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(" {} ", req.model.to_uppercase()),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
                     ]));
 
                 let inner = block.inner(slot_area);
@@ -862,27 +982,23 @@ impl App {
                 ];
 
                 let stats_row = Row::new(vec![
-                Cell::from(Span::styled(
-                    match req.intent {
-                        Some(i) => format!("{:?}", i).to_uppercase(),
-                        None => "AUTO".to_string(),
-                    },
-                    Style::default().fg(border_color),
-                )),
+                    Cell::from(Span::styled(
+                        match req.intent {
+                            Some(i) => format!("{:?}", i).to_uppercase(),
+                            None => "AUTO".to_string(),
+                        },
+                        Style::default().fg(border_color),
+                    )),
                     Cell::from(Line::from(vec![
                         status_indicator,
                         Span::raw(" "),
                         Span::styled(heartbeat_icon, heartbeat_style),
                     ])),
-                    Cell::from(Span::styled(
-                        cost_display,
-                        Style::default().fg(cost_color),
-                    )),
+                    Cell::from(Span::styled(cost_display, Style::default().fg(cost_color))),
                     Cell::from(Span::raw(time_text.trim())),
                 ]);
 
-                let stats_table = Table::new(vec![stats_row], table_widths)
-                    .column_spacing(1);
+                let stats_table = Table::new(vec![stats_row], table_widths).column_spacing(1);
 
                 f.render_widget(stats_table, inner_layout[0]);
 
@@ -894,20 +1010,38 @@ impl App {
                     Span::styled("🛠 ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
                         tool_text,
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::ITALIC),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::ITALIC),
                     ),
                 ]);
 
-                f.render_widget(Paragraph::new(tool_line).wrap(Wrap { trim: true }), inner_layout[1]);
+                f.render_widget(
+                    Paragraph::new(tool_line).wrap(Wrap { trim: true }),
+                    inner_layout[1],
+                );
             } else {
                 let is_selected = self.state.list_state.selected() == Some(i);
                 // Empty slot placeholder
                 let block = Block::default()
                     .borders(Borders::ALL)
-                    .border_type(if is_selected { BorderType::Thick } else { BorderType::Rounded })
-                    .border_style(if is_selected { Style::default().fg(Color::White) } else { Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM) })
+                    .border_type(if is_selected {
+                        BorderType::Thick
+                    } else {
+                        BorderType::Rounded
+                    })
+                    .border_style(if is_selected {
+                        Style::default().fg(Color::White)
+                    } else {
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::DIM)
+                    })
                     .bg(Color::Black)
-                    .title(Span::styled(" EMPTY SLOT ", Style::default().fg(Color::DarkGray)));
+                    .title(Span::styled(
+                        " EMPTY SLOT ",
+                        Style::default().fg(Color::DarkGray),
+                    ));
                 f.render_widget(block, slot_area);
             }
         }
@@ -934,20 +1068,17 @@ impl App {
             let layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3), // Info row 1
+                    Constraint::Length(3),                              // Info row 1
                     Constraint::Length(if is_compact { 4 } else { 3 }), // Info row 2 (Stats)
-                    Constraint::Min(0),    // Content
+                    Constraint::Min(0),                                 // Content
                 ])
                 .split(area);
 
             // Row 1: Session Info
             let header1 = if is_compact {
-                format!(" FOCUS: #{} | ", &req.id[..6.min(req.id.len())])
+                format!(" FOCUS: #{} | ", req.id.short())
             } else {
-                format!(
-                    " FOCUS SESSION: #{} | MODE: ",
-                    &req.id[..8.min(req.id.len())]
-                )
+                format!(" FOCUS SESSION: #{} | MODE: ", req.id.short())
             };
             let header1_p = Paragraph::new(Line::from(vec![
                 Span::raw(header1),
@@ -966,13 +1097,13 @@ impl App {
             f.render_widget(header1_p, layout[0]);
 
             // Row 2: Stats
-            let tps = if let Some(latency) = req.latency_ms {
+            let tps = if let Some(latency) = req.latency {
                 let tokens = match req.usage.as_ref() {
                     Some(u) => u.completion_tokens,
                     None => 0,
                 };
-                if latency > 0 {
-                    (tokens as f64 / (latency as f64 / 1000.0)) as u32
+                if latency.0 > 0 {
+                    (tokens as f64 / (latency.0 as f64 / 1000.0)) as u32
                 } else {
                     0
                 }
@@ -1000,12 +1131,12 @@ impl App {
             };
 
             let (actual_cost, savings) = match (req.actual_cost, req.potential_cost_no_cache) {
-                (Some(actual), Some(potential)) => (actual, potential - actual),
+                (Some(actual), Some(potential)) => (actual.0, potential.0 - actual.0),
                 _ => (0.0, 0.0),
             };
 
-            let latency_val = match req.latency_ms {
-                Some(l) => l,
+            let latency_val = match req.latency {
+                Some(l) => l.0,
                 None => 0,
             };
 
@@ -1086,7 +1217,11 @@ impl App {
 
             let p = Paragraph::new(chat_content)
                 .wrap(Wrap { trim: false })
-                .block(Block::default().borders(Borders::LEFT | Borders::RIGHT).bg(Color::Black));
+                .block(
+                    Block::default()
+                        .borders(Borders::LEFT | Borders::RIGHT)
+                        .bg(Color::Black),
+                );
 
             f.render_widget(p, layout[2]);
         } else {
@@ -1146,15 +1281,15 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(if is_compact { 3 } else { 4 }), // Legend/table
-                Constraint::Percentage(40), // TPS chart
-                Constraint::Percentage(30), // Tokens chart  
-                Constraint::Percentage(30), // Cost chart
+                Constraint::Percentage(40),                         // TPS chart
+                Constraint::Percentage(30),                         // Tokens chart
+                Constraint::Percentage(30),                         // Cost chart
             ])
             .split(area);
 
         // Render legend/table
         self.render_graphs_legend(f, chunks[0]);
-        
+
         // Render the three charts
         self.render_tps_chart(f, chunks[1]);
         self.render_tokens_chart(f, chunks[2]);
@@ -1163,14 +1298,26 @@ impl App {
 
     fn render_graphs_legend(&self, f: &mut Frame, area: Rect) {
         let mut legend_items = Vec::new();
-        
+
         // Add header
         if area.width > 60 {
             legend_items.push(Row::new(vec![
-                Cell::from(Span::styled("MODEL", Style::default().add_modifier(Modifier::BOLD))),
-                Cell::from(Span::styled("TPS", Style::default().add_modifier(Modifier::BOLD))),
-                Cell::from(Span::styled("TOKENS", Style::default().add_modifier(Modifier::BOLD))),
-                Cell::from(Span::styled("COST", Style::default().add_modifier(Modifier::BOLD))),
+                Cell::from(Span::styled(
+                    "MODEL",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    "TPS",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    "TOKENS",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    "COST",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
             ]));
         }
 
@@ -1179,26 +1326,29 @@ impl App {
         for model in models {
             let color = self.state.graph_state.get_model_color(model);
             let model_data = &self.state.graph_state.models[model];
-            
-            let current_tps = model_data.buckets.back()
-                .map(|b| b.tps_completion)
-                .unwrap_or(0.0);
-            
+
+            let current_tps = match model_data
+                .buckets
+                .back() {
+                    Some(b) => b.tps_completion,
+                    None => 0.0,
+                };
+
             let row = if area.width > 60 {
                 Row::new(vec![
                     Cell::from(Span::styled(
                         model,
-                        Style::default().fg(color).add_modifier(Modifier::BOLD)
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
                     )),
                     Cell::from(Span::raw(format!("{:.1}", current_tps))),
                     Cell::from(Span::raw(model_data.current_total_tokens.to_string())),
-                    Cell::from(Span::raw(format!("${:.4}", model_data.current_total_cost))),
+                    Cell::from(Span::raw(format!("${}", model_data.current_total_cost))),
                 ])
             } else {
                 Row::new(vec![
                     Cell::from(Span::styled(
                         model,
-                        Style::default().fg(color).add_modifier(Modifier::BOLD)
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
                     )),
                     Cell::from(Span::raw(format!("{:.1} TPS", current_tps))),
                 ])
@@ -1210,35 +1360,35 @@ impl App {
         let total_tps = self.state.graph_state.get_total_tps();
         let total_tokens = self.state.graph_state.get_total_tokens();
         let total_cost = self.state.graph_state.get_total_cost();
-        
+
         let totals_row = if area.width > 60 {
             Row::new(vec![
                 Cell::from(Span::styled(
                     "TOTAL",
-                    Style::default().add_modifier(Modifier::BOLD)
+                    Style::default().add_modifier(Modifier::BOLD),
                 )),
                 Cell::from(Span::styled(
                     format!("{:.1}", total_tps),
-                    Style::default().add_modifier(Modifier::BOLD)
+                    Style::default().add_modifier(Modifier::BOLD),
                 )),
                 Cell::from(Span::styled(
                     total_tokens.to_string(),
-                    Style::default().add_modifier(Modifier::BOLD)
+                    Style::default().add_modifier(Modifier::BOLD),
                 )),
                 Cell::from(Span::styled(
-                    format!("${:.4}", total_cost),
-                    Style::default().add_modifier(Modifier::BOLD)
+                    format!("${}", total_cost),
+                    Style::default().add_modifier(Modifier::BOLD),
                 )),
             ])
         } else {
             Row::new(vec![
                 Cell::from(Span::styled(
                     "TOTAL",
-                    Style::default().add_modifier(Modifier::BOLD)
+                    Style::default().add_modifier(Modifier::BOLD),
                 )),
                 Cell::from(Span::styled(
                     format!("{:.1} TPS", total_tps),
-                    Style::default().add_modifier(Modifier::BOLD)
+                    Style::default().add_modifier(Modifier::BOLD),
                 )),
             ])
         };
@@ -1252,10 +1402,7 @@ impl App {
                 Constraint::Percentage(20),
             ]
         } else {
-            vec![
-                Constraint::Percentage(60),
-                Constraint::Percentage(40),
-            ]
+            vec![Constraint::Percentage(60), Constraint::Percentage(40)]
         };
 
         let table = Table::new(legend_items, widths)
@@ -1266,46 +1413,53 @@ impl App {
 
     fn render_tps_chart(&self, f: &mut Frame, area: Rect) {
         self.render_stacked_chart(
-            f, 
-            area, 
+            f,
+            area,
             " COMPLETION TPS ",
             |model_data| {
-                model_data.buckets.back()
-                    .map(|b| b.tps_completion)
-                    .unwrap_or(0.0)
+                match model_data
+                    .buckets
+                    .back() {
+                        Some(b) => b.tps_completion,
+                        None => 0.0,
+                    }
             },
-            true // show current value
+            true, // show current value
         );
     }
 
     fn render_tokens_chart(&self, f: &mut Frame, area: Rect) {
         self.render_stacked_chart(
-            f, 
-            area, 
+            f,
+            area,
             " COMPLETION TOKENS (5m window) ",
             |model_data| model_data.current_total_tokens as f64,
-            false // don't show current value for cumulative
+            false, // don't show current value for cumulative
         );
     }
 
     fn render_cost_chart(&self, f: &mut Frame, area: Rect) {
         self.render_stacked_chart(
-            f, 
-            area, 
+            f,
+            area,
             " COST (5m window) ",
             |model_data| model_data.current_total_cost,
-            false // don't show current value for cumulative
+            false, // don't show current value for cumulative
         );
     }
 
-    fn render_stacked_chart<F>(&self, f: &mut Frame, area: Rect, title: &str, get_value: F, show_current: bool) 
-    where
+    fn render_stacked_chart<F>(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        title: &str,
+        get_value: F,
+        show_current: bool,
+    ) where
         F: Fn(&ModelGraphData) -> f64,
     {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(title);
-        
+        let block = Block::default().borders(Borders::ALL).title(title);
+
         let inner = block.inner(area);
         f.render_widget(block, area);
 
@@ -1320,7 +1474,7 @@ impl App {
         // Calculate chart dimensions
         let chart_width = inner.width.saturating_sub(2) as usize;
         let chart_height = inner.height.saturating_sub(2) as usize;
-        
+
         if chart_width < 10 || chart_height < 3 {
             let p = Paragraph::new("Chart area too small")
                 .alignment(Alignment::Center)
@@ -1330,7 +1484,10 @@ impl App {
         }
 
         // Get current values for each model
-        let mut model_values: Vec<(String, f64, Color)> = self.state.graph_state.models
+        let mut model_values: Vec<(String, f64, Color)> = self
+            .state
+            .graph_state
+            .models
             .iter()
             .map(|(model, data)| {
                 let value = get_value(data);
@@ -1346,7 +1503,7 @@ impl App {
         });
 
         let total_value: f64 = model_values.iter().map(|(_, v, _)| v).sum();
-        
+
         if total_value <= 0.0 {
             let p = Paragraph::new("No activity")
                 .alignment(Alignment::Center)
@@ -1360,7 +1517,7 @@ impl App {
             if x_offset >= chart_width {
                 break;
             }
-            
+
             let bar_height = ((value / total_value) * chart_height as f64).round() as usize;
             if bar_height == 0 {
                 continue;
@@ -1370,12 +1527,13 @@ impl App {
             for y in 0..bar_height {
                 let y_pos = inner.y + inner.height - 2 - y as u16; // Start from bottom
                 let x_pos = inner.x + 1 + x_offset as u16;
-                
-                if y_pos > inner.y && y_pos < inner.y + inner.height - 1
-                    && let Some(cell) = f.buffer_mut().cell_mut((x_pos, y_pos)) {
-                        cell.set_char('█')
-                           .set_style(Style::default().fg(*color));
+
+                if y_pos > inner.y && y_pos < inner.y + inner.height - 1 {
+                    let cell = &mut f.buffer_mut()[Position::new(x_pos, y_pos)];
+                    {
+                        cell.set_char('█').set_style(Style::default().fg(*color));
                     }
+                }
             }
         }
 
@@ -1386,16 +1544,16 @@ impl App {
                 &total_text,
                 Style::default()
                     .add_modifier(Modifier::BOLD)
-                    .fg(Color::White)
+                    .fg(Color::White),
             );
-            
+
             let total_area = Rect {
                 x: inner.x + inner.width.saturating_sub(total_text.len() as u16 + 2),
                 y: inner.y,
                 width: total_text.len() as u16 + 2,
                 height: 1,
             };
-            
+
             if total_area.width > 0 {
                 f.render_widget(Paragraph::new(total_span), total_area);
             }
@@ -1404,9 +1562,10 @@ impl App {
 
     fn render_size_warning(&self, f: &mut Frame, area: Rect) {
         let msg = vec![
-            Line::from(vec![
-                Span::styled(" TERMINAL TOO SMALL ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            ]),
+            Line::from(vec![Span::styled(
+                " TERMINAL TOO SMALL ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )]),
             Line::from(""),
             Line::from(format!(" Current width: {} ", area.width)),
             Line::from(" Minimum required: 75 "),
@@ -1415,7 +1574,12 @@ impl App {
         ];
 
         let p = Paragraph::new(msg)
-            .block(Block::default().borders(Borders::ALL).border_type(BorderType::Double).border_style(Style::default().fg(Color::Red)))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Double)
+                    .border_style(Style::default().fg(Color::Red)),
+            )
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true });
 
@@ -1449,20 +1613,23 @@ impl GraphState {
         // Assign color if new model
         if !self.model_colors.contains_key(model) {
             let color_index = self.model_colors.len() % self.color_palette.len();
-            self.model_colors.insert(model.to_string(), self.color_palette[color_index]);
+            self.model_colors
+                .insert(model.to_string(), self.color_palette[color_index]);
         }
 
-        self.models.entry(model.to_string()).or_insert_with(|| ModelGraphData {
-            buckets: VecDeque::with_capacity(300),
-            current_total_tokens: 0,
-            current_total_cost: 0.0,
-        })
+        self.models
+            .entry(model.to_string())
+            .or_insert_with(|| ModelGraphData {
+                buckets: VecDeque::with_capacity(300),
+                current_total_tokens: 0,
+                current_total_cost: 0.0,
+            })
     }
 
     fn advance_time(&mut self) {
         let now = std::time::Instant::now();
         let elapsed_secs = now.duration_since(self.current_time).as_secs() as usize;
-        
+
         if elapsed_secs > 0 {
             // Add empty buckets for elapsed time for all existing models
             for _ in 0..elapsed_secs.min(self.window_size_secs) {
@@ -1481,13 +1648,22 @@ impl GraphState {
         }
     }
 
-    fn record_request_completion(&mut self, model: &str, completion_tokens: u32, latency_ms: u128, actual_cost: f64) {
+    fn record_request_completion(
+        &mut self,
+        model: &str,
+        completion_tokens: u32,
+        latency_ms: LatencyMs,
+        actual_cost: CostUsd,
+    ) {
         self.advance_time();
-        
+
         let model_data = self.get_or_create_model_data(model);
-        
+
+        let LatencyMs(latency_val) = latency_ms;
+        let CostUsd(cost_val) = actual_cost;
+
         // Calculate TPS (tokens per second)
-        let latency_secs = latency_ms as f64 / 1000.0;
+        let latency_secs = latency_val as f64 / 1000.0;
         let tps = if latency_secs > 0.0 {
             completion_tokens as f64 / latency_secs
         } else {
@@ -1496,7 +1672,7 @@ impl GraphState {
 
         // Update current totals
         model_data.current_total_tokens += completion_tokens as u64;
-        model_data.current_total_cost += actual_cost;
+        model_data.current_total_cost += cost_val;
 
         // Ensure we have at least one bucket, then add to latest bucket
         if model_data.buckets.is_empty() {
@@ -1506,11 +1682,11 @@ impl GraphState {
                 cost_delta: 0.0,
             });
         }
-        
+
         if let Some(bucket) = model_data.buckets.back_mut() {
             bucket.tps_completion += tps;
             bucket.tokens_completion_delta += completion_tokens as u64;
-            bucket.cost_delta += actual_cost;
+            bucket.cost_delta += cost_val;
         }
     }
 
@@ -1522,20 +1698,23 @@ impl GraphState {
     }
 
     fn get_total_tps(&self) -> f64 {
-        self.models.values()
+        self.models
+            .values()
             .flat_map(|data| data.buckets.back())
             .map(|bucket| bucket.tps_completion)
             .sum()
     }
 
     fn get_total_tokens(&self) -> u64 {
-        self.models.values()
+        self.models
+            .values()
             .map(|data| data.current_total_tokens)
             .sum()
     }
 
     fn get_total_cost(&self) -> f64 {
-        self.models.values()
+        self.models
+            .values()
             .map(|data| data.current_total_cost)
             .sum()
     }
@@ -1578,7 +1757,9 @@ impl MatrixEffect {
                 y: self.rng.f32() * -20.0,
                 speed: self.rng.f32() * 0.5 + 0.1,
                 length: self.rng.usize(5..15),
-                chars: (0..20).map(|_| Self::random_matrix_char_with_rng(&mut self.rng)).collect(),
+                chars: (0..20)
+                    .map(|_| Self::random_matrix_char_with_rng(&mut self.rng))
+                    .collect(),
             });
         }
     }
@@ -1640,20 +1821,25 @@ impl MatrixEffect {
                     let y = y_val as u16;
                     let char_idx = (self.random_offset(x, i)) % drop.chars.len();
                     let c = drop.chars[char_idx];
-                    
+
                     let style = if i == 0 {
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
                     } else if i < 3 {
                         Style::default().fg(Color::Green)
                     } else {
                         let color_val = 22 + (i as u8).min(5); // Darker greens
-                        Style::default().fg(Color::Indexed(color_val)).add_modifier(Modifier::DIM)
+                        Style::default()
+                            .fg(Color::Indexed(color_val))
+                            .add_modifier(Modifier::DIM)
                     };
 
-                    if x < area.width
-                        && let Some(cell) = f.buffer_mut().cell_mut((x, y))
-                    {
-                        cell.set_char(c).set_style(style);
+                    if x < area.width {
+                        let cell = &mut f.buffer_mut()[Position::new(x, y)];
+                        {
+                            cell.set_char(c).set_style(style);
+                        }
                     }
                 }
             }
@@ -1690,7 +1876,7 @@ impl App {
     #[allow(dead_code)]
     fn render_status_bar(&self, f: &mut Frame, area: Rect) {
         let status_text = format!(
-            " Uptime: {}s | Active: {} | Total: {} | Session Cost: ${:.4}",
+            " Uptime: {}s | Active: {} | Total: {} | Session Cost: ${}",
             self.state.server_uptime,
             self.state.active_connections,
             self.state.total_requests,
@@ -1724,20 +1910,23 @@ mod graph_tests {
     #[test]
     fn test_record_request_completion() {
         let mut graph_state = GraphState::new();
-        
+
         // Record a request
         graph_state.record_request_completion("gpt-4", 100, 2000, 0.01);
-        
+
         assert_eq!(graph_state.models.len(), 1);
         assert!(graph_state.model_colors.contains_key("gpt-4"));
-        
+
         let model_data = &graph_state.models["gpt-4"];
         assert_eq!(model_data.current_total_tokens, 100);
         assert_eq!(model_data.current_total_cost, 0.01);
-        
+
         // Check that we have at least one bucket with data
         assert!(!model_data.buckets.is_empty());
-        let bucket = model_data.buckets.back().unwrap();
+        let bucket = match model_data.buckets.back() {
+            Some(b) => b,
+            None => return,
+        };
         assert!(bucket.tps_completion > 0.0); // Should have some TPS
         assert_eq!(bucket.tokens_completion_delta, 100);
         assert_eq!(bucket.cost_delta, 0.01);
@@ -1746,27 +1935,30 @@ mod graph_tests {
     #[test]
     fn test_tps_calculation() {
         let mut graph_state = GraphState::new();
-        
+
         // Test TPS calculation: 100 tokens in 2 seconds = 50 TPS
         graph_state.record_request_completion("gpt-4", 100, 2000, 0.01);
-        
+
         let model_data = &graph_state.models["gpt-4"];
-        let bucket = model_data.buckets.back().unwrap();
+        let bucket = match model_data.buckets.back() {
+            Some(b) => b,
+            None => return,
+        };
         assert!((bucket.tps_completion - 50.0).abs() < 0.1);
     }
 
     #[test]
     fn test_multiple_models() {
         let mut graph_state = GraphState::new();
-        
+
         // Record requests for different models
         graph_state.record_request_completion("gpt-4", 100, 2000, 0.01);
         graph_state.record_request_completion("claude-3", 150, 3000, 0.015);
-        
+
         assert_eq!(graph_state.models.len(), 2);
         assert!(graph_state.models.contains_key("gpt-4"));
         assert!(graph_state.models.contains_key("claude-3"));
-        
+
         // Check totals
         assert_eq!(graph_state.get_total_tokens(), 250);
         assert!((graph_state.get_total_cost() - 0.025).abs() < 0.001);
@@ -1775,17 +1967,17 @@ mod graph_tests {
     #[test]
     fn test_color_assignment() {
         let mut graph_state = GraphState::new();
-        
+
         // First model should get first color
         graph_state.record_request_completion("model1", 100, 2000, 0.01);
         let color1 = graph_state.get_model_color("model1");
-        
+
         // Second model should get second color
         graph_state.record_request_completion("model2", 100, 2000, 0.01);
         let color2 = graph_state.get_model_color("model2");
-        
+
         assert_ne!(color1, color2);
-        
+
         // Same model should always get same color
         let color1_again = graph_state.get_model_color("model1");
         assert_eq!(color1, color1_again);
@@ -1794,15 +1986,15 @@ mod graph_tests {
     #[test]
     fn test_advance_time() {
         let mut graph_state = GraphState::new();
-        
+
         // Add initial data
         graph_state.record_request_completion("gpt-4", 100, 2000, 0.01);
         let initial_bucket_count = graph_state.models["gpt-4"].buckets.len();
-        
+
         // Advance time by 1 second
         std::thread::sleep(std::time::Duration::from_millis(1100));
         graph_state.advance_time();
-        
+
         // Should have added a new bucket
         let new_bucket_count = graph_state.models["gpt-4"].buckets.len();
         assert_eq!(new_bucket_count, initial_bucket_count + 1);
@@ -1812,18 +2004,13 @@ mod graph_tests {
     fn test_window_size_limit() {
         let mut graph_state = GraphState::new();
         graph_state.window_size_secs = 3; // Small window for testing
-        
+
         // Add more buckets than window size
         for i in 0..5 {
-            graph_state.record_request_completion(
-                &format!("model{}", i % 2), 
-                100, 
-                2000, 
-                0.01
-            );
+            graph_state.record_request_completion(&format!("model{}", i % 2), 100, 2000, 0.01);
             std::thread::sleep(std::time::Duration::from_millis(1100));
         }
-        
+
         // Should not exceed window size
         for model_data in graph_state.models.values() {
             assert!(model_data.buckets.len() <= 3);

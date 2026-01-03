@@ -1,3 +1,4 @@
+use crate::str_utils;
 use serde_json::json;
 
 pub struct RescueResult {
@@ -14,19 +15,19 @@ pub fn detect_xml_invoke(text: &str) -> Option<RescueResult> {
     let start_idx = text.find("<invoke")?;
     let end_tag = "</invoke>";
     let end_idx = text.find(end_tag)?;
-    
-    let tag_content = &text[start_idx..end_idx + end_tag.len()];
-    
+
+    let tag_content = str_utils::slice_bytes_safe(text, start_idx, end_idx + end_tag.len())?;
+
     // Extract name
     let name_start = tag_content.find("name=\"")? + 6;
     let name_end = tag_content[name_start..].find("\"")? + name_start;
-    let name = tag_content[name_start..name_end].to_string();
-    
+    let name = str_utils::slice_bytes_safe(tag_content, name_start, name_end)?.to_string();
+
     // Extract body (JSON)
     let body_start = tag_content.find(">")? + 1;
     let body_end = tag_content.find("</invoke>")?;
-    let body_str = tag_content[body_start..body_end].trim();
-    
+    let body_str = str_utils::slice_bytes_safe(tag_content, body_start, body_end)?.trim();
+
     let arguments = if body_str.is_empty() {
         "{}".to_string()
     } else {
@@ -36,7 +37,7 @@ pub fn detect_xml_invoke(text: &str) -> Option<RescueResult> {
     Some(RescueResult {
         name: name.clone(),
         tool_call: json!({
-            "id": format!("call_{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
+            "id": format!("call_{}", str_utils::prefix_chars(&uuid::Uuid::new_v4().to_string(), 8)),
             "type": "function",
             "function": {
                 "name": name,
@@ -45,4 +46,3 @@ pub fn detect_xml_invoke(text: &str) -> Option<RescueResult> {
         }),
     })
 }
-
