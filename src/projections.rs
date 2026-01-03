@@ -127,10 +127,16 @@ impl OpenRouterAdapter {
             .get("tool_choice")
             .map(Self::project_tool_choice);
 
+        let stream = context
+            .extra_body
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .or(Some(true));
+
         OpenAiRequest {
             model: model_id.to_string(),
             messages,
-            stream: Some(true),
+            stream,
             temperature: context
                 .extra_body
                 .get("temperature")

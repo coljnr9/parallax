@@ -82,6 +82,14 @@ impl StreamHandler {
 
         while let Some(line_result) = lines_stream.next().await {
             line_count += 1;
+
+            // Heartbeat every 50 lines if we are still buffering
+            if !has_seen_tool_call && line_count % 50 == 0 {
+                let _ = tx
+                    .send(Ok(axum::response::sse::Event::default().comment("parallax-heartbeat")))
+                    .await;
+            }
+
             if line_count > MAX_STREAM_LINES {
                 tracing::error!(
                     "[☁️  -> ⚙️ ] Stream exceeded max line limit ({})",
