@@ -87,11 +87,25 @@ impl ParallaxEngine {
         Ok(())
     }
 
-    pub async fn lift(payload: serde_json::Value, db: &DbPool) -> Result<TurnOperationEntry> {
+    pub async fn lift(
+        payload: serde_json::Value,
+        db: &DbPool,
+        header_conversation_id: Option<String>,
+    ) -> Result<TurnOperationEntry> {
         let raw: RawTurn = serde_json::from_value(payload)
             .map_err(|e| ParallaxError::InvalidIngress(e.to_string()))?;
 
-        let anchor_hash = raw.extract_conversation_id()?;
+        // Prefer header conversation ID (from Cursor), then metadata, then fallback to hash
+        let anchor_hash = match header_conversation_id {
+            Some(cid) => {
+                tracing::info!(
+                    "[⚙️  -> ⚙️ ] Using header-provided conversation ID: [{}...]",
+                    crate::str_utils::prefix_chars(&cid, 8)
+                );
+                cid
+            }
+            None => raw.extract_conversation_id()?,
+        };
         let request_id = raw.extract_request_id();
 
         // Pass 1: Build records and infer roles

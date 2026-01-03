@@ -864,8 +864,7 @@ function App() {
                                 {turn.issues.rescue_used > 0 && <span className="w-1.5 h-1.5 rounded-full bg-amber-500" title="Rescue Used"></span>}
                                 {turn.issues.tool_call_duplicate_id > 0 && <span className="w-1.5 h-1.5 rounded-full bg-pink-500" title="Duplicate Tool Call ID"></span>}
                               </div>
-                              );
-                            })()}
+                            )}
                           </div>
                           <span className="text-[10px] text-slate-500 font-mono opacity-0 group-hover:opacity-100 transition-opacity">{turn.request_id.slice(0, 8)}</span>
                         </div>
@@ -1041,8 +1040,7 @@ function App() {
                                         >
                                           {isExpanded ? '▼' : '▶'}
                                         </button>
-                                        );
-                            })()}
+                                      )}
                                     </div>
                                   </td>
                                   <td className="px-4 py-2">
@@ -1064,8 +1062,7 @@ function App() {
                                       >
                                         <ExternalLink size={14} />
                                       </button>
-                                      );
-                            })()}
+                                    )}
                                   </td>
                                 </tr>
                               );
@@ -1200,8 +1197,7 @@ function App() {
                                     >
                                       <ExternalLink size={14} />
                                     </button>
-                                    );
-                            })()}
+                                  )}
                                 </td>
                               </tr>
                             ))}
@@ -1347,8 +1343,7 @@ function App() {
                               >
                                 {visibleBlobId === stage.blob_ref!.blob_id ? 'Hide Blob' : 'View Blob'}
                               </button>
-                              );
-                            })()}
+                            )}
                           </div>
                         </div>
                       ))}

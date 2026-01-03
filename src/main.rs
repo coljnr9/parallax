@@ -250,12 +250,28 @@ async fn chat_completions_handler(
         span.record("cf.ip", forwarded);
     }
 
+    // Extract Cursor conversation ID from headers if present
+    // Try multiple possible header names that Cursor might use
+    let cursor_conversation_id = headers
+        .get("x-cursor-conversation-id")
+        .or_else(|| headers.get("x-conversation-id"))
+        .or_else(|| headers.get("cursor-conversation-id"))
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+
+    if let Some(ref cid) = cursor_conversation_id {
+        tracing::info!(
+            "[🖱️  -> ⚙️ ] Found Cursor conversation ID in header: [{}...]",
+            crate::str_utils::prefix_chars(cid, 8)
+        );
+    }
+
     if let Err(resp) = validate_payload(&payload) {
         span.record("shim.outcome", "client_error");
         return *resp;
     }
 
-    let entry = match ParallaxEngine::lift(payload.clone(), &state.db).await {
+    let entry = match ParallaxEngine::lift(payload.clone(), &state.db, cursor_conversation_id).await {
         Ok(e) => e,
         Err(e) => {
             tracing::error!("[🖱️  -> ⚙️ ] Lift Failed: {}", e);

@@ -1,4 +1,5 @@
 use crate::constants::{DIFF_MARKERS, FORBIDDEN_PLAN_TERMS};
+use crate::tag_extract::TagRegistry;
 use crate::types::{ParallaxError, Result};
 use axum::http as ax_http;
 use serde_json::{Map, Value};
@@ -278,10 +279,222 @@ pub fn scrub_tool_protocol_leaks(text: &str) -> String {
     out.trim_end().to_string()
 }
 
+#[derive(Default, Debug)]
+pub struct CursorTagScrubber {
+    state: ScrubberState,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
+enum ScrubberState {
+    #[default]
+    Normal,
+    InTagOpening(String), // The partial tag being read: e.g. "user_qu"
+    InTagClosing(String, String), // (tag_to_match, partial_closing_tag) e.g. ("user_query", "/user_qu")
+    Redacting(String),    // tag_name being redacted
+    Unrolling(String),    // tag_name whose content we are keeping, but we want to drop its closing tag
+}
+
+impl CursorTagScrubber {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Processes a chunk of text and returns the scrubbed version.
+    /// Maintains state between calls to handle tags spanning chunks.
+    pub fn scrub_chunk(&mut self, chunk: &str) -> String {
+        let registry = TagRegistry::default();
+        let mut output = String::new();
+
+        for c in chunk.chars() {
+            match self.state.clone() {
+                ScrubberState::Normal => {
+                    if c == '<' {
+                        self.state = ScrubberState::InTagOpening(String::new());
+                    } else {
+                        output.push(c);
+                    }
+                }
+                ScrubberState::InTagOpening(mut partial) => {
+                    if c == '>' {
+                        let tag_name = partial.clone();
+                        let is_scaffolding = registry.tags.iter().any(|t| t.tag == tag_name && t.is_scaffolding);
+                        
+                        if is_scaffolding {
+                            if tag_name == "user_query" {
+                                // For user_query, we drop the tags but keep the content
+                                self.state = ScrubberState::Unrolling(tag_name);
+                            } else {
+                                // For other scaffolding, we redact everything
+                                self.state = ScrubberState::Redacting(tag_name);
+                            }
+                        } else {
+                            // Not a scaffolding tag, emit the original sequence
+                            output.push('<');
+                            output.push_str(&partial);
+                            output.push('>');
+                            self.state = ScrubberState::Normal;
+                        }
+                    } else if c.is_alphanumeric() || c == '_' || c == '-' {
+                        partial.push(c);
+                        self.state = ScrubberState::InTagOpening(partial);
+                    } else if c == '/' && partial.is_empty() {
+                         self.state = ScrubberState::InTagClosing(String::new(), "/".to_string());
+                    } else {
+                        // Not a valid tag character
+                        output.push('<');
+                        output.push_str(&partial);
+                        output.push(c);
+                        self.state = ScrubberState::Normal;
+                    }
+                }
+                ScrubberState::Unrolling(tag_name) => {
+                    if c == '<' {
+                        self.state = ScrubberState::InTagClosing(tag_name, String::new());
+                    } else {
+                        output.push(c);
+                    }
+                }
+                ScrubberState::InTagClosing(tag_to_match, mut partial_close) => {
+                    if c == '>' {
+                        let close_name = if let Some(stripped) = partial_close.strip_prefix('/') {
+                            stripped
+                        } else {
+                            partial_close.as_str()
+                        };
+
+                        if !tag_to_match.is_empty() && close_name == tag_to_match {
+                            // Successfully closed a tag we were unrolling or redacting
+                            self.state = ScrubberState::Normal;
+                        } else {
+                            // Doesn't match
+                            if tag_to_match.is_empty() {
+                                // We were in Normal state and saw </...>
+                                output.push('<');
+                                output.push_str(&partial_close);
+                                output.push('>');
+                                self.state = ScrubberState::Normal;
+                            } else {
+                                // We are in Redacting/Unrolling mode but this wasn't our closing tag
+                                // If we were unrolling, we must emit the '<', the partial, and the '>' because it might be a nested tag or just text
+                                // Wait, if we are in Unrolling, and we see <other_tag>, we should just emit it.
+                                let is_unrolling = registry.tags.iter().any(|t| t.tag == tag_to_match && t.tag == "user_query");
+                                
+                                if is_unrolling {
+                                    output.push('<');
+                                    output.push_str(&partial_close);
+                                    output.push('>');
+                                    self.state = ScrubberState::Unrolling(tag_to_match);
+                                } else {
+                                    // Stay redacting
+                                    self.state = ScrubberState::Redacting(tag_to_match);
+                                }
+                            }
+                        }
+                    } else if c.is_alphanumeric() || c == '_' || c == '-' || c == '/' {
+                        partial_close.push(c);
+                        self.state = ScrubberState::InTagClosing(tag_to_match, partial_close);
+                    } else if tag_to_match.is_empty() {
+                        output.push('<');
+                        output.push_str(&partial_close);
+                        output.push(c);
+                        self.state = ScrubberState::Normal;
+                    } else {
+                        let is_unrolling = registry.tags.iter().any(|t| t.tag == tag_to_match && t.tag == "user_query");
+                        if is_unrolling {
+                            output.push('<');
+                            output.push_str(&partial_close);
+                            output.push(c);
+                            self.state = ScrubberState::Unrolling(tag_to_match);
+                        } else {
+                            self.state = ScrubberState::Redacting(tag_to_match);
+                        }
+                    }
+                }
+                ScrubberState::Redacting(tag_name) => {
+                    if c == '<' {
+                        self.state = ScrubberState::InTagClosing(tag_name, String::new());
+                    } else {
+                        // Drop content
+                    }
+                }
+            }
+        }
+        output
+    }
+
+    /// Finalize scrubbing, returning any leftovers (e.g. if a tag was left open).
+    pub fn finalize(self) -> String {
+        match self.state {
+            ScrubberState::Normal => String::new(),
+            ScrubberState::InTagOpening(partial) => format!("<{}", partial),
+            ScrubberState::InTagClosing(tag_to_match, partial_close) => {
+                if tag_to_match.is_empty() {
+                    format!("<{}", partial_close)
+                } else {
+                    let is_unrolling = tag_to_match == "user_query";
+                    if is_unrolling {
+                         format!("<{}", partial_close)
+                    } else {
+                        String::new()
+                    }
+                }
+            }
+            ScrubberState::Redacting(_) => String::new(),
+            ScrubberState::Unrolling(_) => String::new(),
+        }
+    }
+}
+
+pub fn scrub_cursor_tags(text: &str) -> String {
+    let mut scrubber = CursorTagScrubber::new();
+    let mut out = scrubber.scrub_chunk(text);
+    out.push_str(&scrubber.finalize());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_scrub_cursor_tags_simple() {
+        let input = "Hello <user_query>What is up?</user_query> more <system_reminder>secret</system_reminder> end";
+        let got = scrub_cursor_tags(input);
+        assert_eq!(got, "Hello What is up? more  end");
+    }
+
+    #[test]
+    fn test_scrub_cursor_tags_streaming() {
+        let mut scrubber = CursorTagScrubber::new();
+        let chunk1 = "Hello <user_qu";
+        let chunk2 = "ery>What is ";
+        let chunk3 = "up?</user_query> more <system_remin";
+        let chunk4 = "der>secret</system_reminder> end";
+
+        let mut got = String::new();
+        got.push_str(&scrubber.scrub_chunk(chunk1));
+        got.push_str(&scrubber.scrub_chunk(chunk2));
+        got.push_str(&scrubber.scrub_chunk(chunk3));
+        got.push_str(&scrubber.scrub_chunk(chunk4));
+        got.push_str(&scrubber.finalize());
+
+        assert_eq!(got, "Hello What is up? more  end");
+    }
+
+    #[test]
+    fn test_scrub_cursor_tags_non_scaffolding() {
+        let input = "Keep <unknown_tag>content</unknown_tag> please";
+        let got = scrub_cursor_tags(input);
+        assert_eq!(got, "Keep <unknown_tag>content</unknown_tag> please");
+    }
+
+    #[test]
+    fn test_scrub_cursor_tags_malformed() {
+        let input = "Partial <system_reminder without end";
+        let got = scrub_cursor_tags(input);
+        assert_eq!(got, "Partial <system_reminder without end");
+    }
 
     #[test]
     fn test_scrub_tool_protocol_leaks() {

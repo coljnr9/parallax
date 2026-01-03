@@ -598,6 +598,25 @@ impl PulseDelta {
             _ => None,
         }
     }
+
+    pub fn extract_reasoning_mut(&mut self) -> Option<&mut String> {
+        let key = if self.extra.contains_key("reasoning") {
+            Some("reasoning")
+        } else if self.extra.contains_key("thought") {
+            Some("thought")
+        } else {
+            None
+        };
+
+        if let Some(k) = key {
+            match self.extra.get_mut(k) {
+                Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Debug)]

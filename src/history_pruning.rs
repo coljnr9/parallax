@@ -5,6 +5,108 @@
 
 use crate::str_utils;
 use crate::types::{MessagePart, Role, TurnRecord};
+use serde_json;
+
+
+// Google/Gemini can error on overly deep JSON payloads (especially nested tool args/results).
+// We measure nesting depth and only prune when depth is high (not just when turn-count is high).
+const GOOGLE_MAX_JSON_NESTING_EXCEEDS: usize = 80;
+const GOOGLE_MAX_JSON_NESTING_APPROACHING: usize = 60;
+
+// Avoid expensive parsing of huge tool outputs; fallback to a lightweight scanner.
+const MAX_JSON_PARSE_BYTES: usize = 256 * 1024;
+
+fn json_value_depth(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => 1,
+        serde_json::Value::Array(arr) => {
+            let mut max_child = 0usize;
+            for v in arr {
+                let d = json_value_depth(v);
+                if d > max_child {
+                    max_child = d;
+                }
+            }
+            1 + max_child
+        }
+        serde_json::Value::Object(map) => {
+            let mut max_child = 0usize;
+            for v in map.values() {
+                let d = json_value_depth(v);
+                if d > max_child {
+                    max_child = d;
+                }
+            }
+            1 + max_child
+        }
+    }
+}
+
+fn json_scan_depth(content: &str) -> usize {
+    // Lightweight approximation of nesting depth for JSON-like strings.
+    // Handles quotes/escapes so braces inside strings don't count.
+    let mut in_string = false;
+    let mut escape = false;
+    let mut depth = 0usize;
+    let mut max_depth = 0usize;
+
+    for ch in content.chars() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            match ch {
+                '\\' => escape = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' | '[' => {
+                depth += 1;
+                if depth > max_depth {
+                    max_depth = depth;
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
+    // +1 so non-empty "{}" yields depth 2-ish (object + leaf), consistent-ish with json_value_depth
+    // but keep 0 for empty input.
+    if content.trim().is_empty() {
+        0
+    } else {
+        max_depth + 1
+    }
+}
+
+fn json_str_depth(content: &str) -> Option<usize> {
+    let trimmed = content.trim_start();
+    let is_jsonish = trimmed.starts_with('{') || trimmed.starts_with('[');
+    if !is_jsonish {
+        return None;
+    }
+
+    if content.len() <= MAX_JSON_PARSE_BYTES {
+        match serde_json::from_str::<serde_json::Value>(content) {
+            Ok(v) => Some(json_value_depth(&v)),
+            Err(_) => Some(json_scan_depth(content)),
+        }
+    } else {
+        Some(json_scan_depth(content))
+    }
+}
 
 /// Analyzes the depth of a conversation history
 #[derive(Debug, Clone)]
@@ -18,41 +120,52 @@ pub struct HistoryDepthAnalysis {
 impl HistoryDepthAnalysis {
     /// Analyze conversation history for depth issues
     pub fn analyze(history: &[TurnRecord]) -> Self {
-        let mut tool_result_turns = 0;
+        let mut tool_result_turns = 0usize;
+        let mut max_nesting_depth = 0usize;
 
         for turn in history {
             for part in &turn.content {
-                if let MessagePart::ToolResult { .. } = part {
-                    tool_result_turns += 1;
+                match part {
+                    MessagePart::ToolResult { content, .. } => {
+                        tool_result_turns += 1;
+                        if let Some(d) = json_str_depth(content) {
+                            if d > max_nesting_depth {
+                                max_nesting_depth = d;
+                            }
+                        }
+                    }
+                    MessagePart::ToolCall { arguments, .. } => {
+                        let d = json_value_depth(arguments);
+                        if d > max_nesting_depth {
+                            max_nesting_depth = d;
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
 
-        // Note: Google's "max recursion depth" error is NOT about message array length.
-        // The JSON structure is typically: {"messages": [msg1, msg2, ...]}
-        // This is only 2-3 levels deep regardless of message count.
-        // The actual limit is about total conversation length (~100 turns) and
-        // deeply nested content within tool results, not the message array itself.
+        // Note: Google's "max recursion depth" issues are primarily about deep nesting
+        // inside tool arguments/results, not simply the number of turns.
         Self {
-            max_nesting_depth: 0,
+            max_nesting_depth,
             total_turns: history.len(),
             tool_result_turns,
-            estimated_json_depth: 0,
+            estimated_json_depth: max_nesting_depth,
         }
     }
 
     /// Check if history exceeds Google's limits
     pub fn exceeds_google_limits(&self) -> bool {
-        // Google's practical limit is around 100 turns before context issues.
-        // The "max recursion depth" error was about deeply nested tool results,
-        // not the message array length. Being conservative with 100 turn limit.
-        self.total_turns > 100
+        // Google/Gemini depth-related failures are usually caused by deeply nested tool
+        // arguments/results (recursion depth), not simply message count.
+        self.estimated_json_depth >= GOOGLE_MAX_JSON_NESTING_EXCEEDS
     }
 
     /// Check if history is approaching limits
     pub fn approaching_google_limits(&self) -> bool {
-        // Warn when approaching 80% of the limit
-        self.total_turns > 80
+        // Warn when approaching the depth threshold
+        self.estimated_json_depth >= GOOGLE_MAX_JSON_NESTING_APPROACHING
     }
 }
 

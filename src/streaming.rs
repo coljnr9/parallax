@@ -180,6 +180,8 @@ impl StreamHandler {
         let mut first_client_send_at: Option<std::time::Instant> = None;
         let mut last_activity_at = std::time::Instant::now();
         let mut end_reason = "upstream_eof";
+        let mut content_scrubber = crate::hardening::CursorTagScrubber::new();
+        let mut reasoning_scrubber = crate::hardening::CursorTagScrubber::new();
 
         while let Some(line_result) = lines_stream.next().await {
             let now = std::time::Instant::now();
@@ -225,22 +227,40 @@ impl StreamHandler {
                 break;
             }
 
-            let should_break = Self::process_stream_line(
-                line_result,
-                &mut metrics,
-                &mut has_seen_tool_call,
-                &mut accumulator,
-                &mut tool_index_map,
-                &conversation_id,
-                &tx,
-                &request_id,
-                &tx_tui,
-                tools_were_advertised,
-                &mut buffered_pulses,
-                state.clone(),
-                model_id.clone(),
-            )
-            .await;
+            let should_break = match line_result {
+                Ok(line) => {
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if data == "[DONE]" {
+                            tracing::debug!("[☁️  -> ⚙️ ] Stream end marker [DONE] received");
+                            Some(false) // Success, not an error
+                        } else {
+                            Self::handle_provider_line(
+                                data,
+                                &mut metrics,
+                                &mut has_seen_tool_call,
+                                &mut accumulator,
+                                &mut tool_index_map,
+                                &conversation_id,
+                                &tx,
+                                &request_id,
+                                &tx_tui,
+                                tools_were_advertised,
+                                &mut buffered_pulses,
+                                state.clone(),
+                                model_id.clone(),
+                                &mut content_scrubber,
+                                &mut reasoning_scrubber,
+                            )
+                            .await
+                        }
+                    } else {
+                        None
+                    }
+                }
+                Err(e) => {
+                    Some(Self::handle_line_error(e, &tx).await)
+                }
+            };
 
             if let Some(is_error) = should_break {
                 if is_error {
@@ -320,10 +340,30 @@ impl StreamHandler {
             Self::persist_signatures(accumulator, conversation_id, db).await;
         }
 
-        let finalized_turn = accumulator.clone().finalize();
+        let mut finalized_turn = accumulator.clone().finalize();
 
-        // Phase 2: Save final turn to bundle
+        // Phase 2: Save final turn to bundle (RAW/UNSANITIZED for forensics)
         let bundle_manager = crate::debug_bundle::BundleManager::new("debug_capture");
+        if let Ok(finalized_json) = serde_json::to_value(&finalized_turn) {
+            let _ = bundle_manager
+                .write_blob(
+                    conversation_id,
+                    tid,
+                    "final_raw",
+                    finalized_json.to_string().as_bytes(),
+                )
+                .await;
+        }
+
+        // Apply final scrub to TurnRecord (sanitized version for turn.json and client)
+        for part in &mut finalized_turn.content {
+            if let MessagePart::Text { content, .. } = part {
+                *content = crate::hardening::scrub_cursor_tags(content);
+            } else if let MessagePart::Thought { content } = part {
+                *content = crate::hardening::scrub_cursor_tags(content);
+            }
+        }
+
         if let Ok(finalized_json) = serde_json::to_value(&finalized_turn) {
             let _ = bundle_manager
                 .write_blob(
@@ -400,6 +440,31 @@ impl StreamHandler {
                 ),
                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
             });
+
+            // Inject synthetic error results for empty tool calls
+            for (tool_id, tool_name) in &empty_arg_tools {
+                let error_message = format!(
+                    "Error: Tool '{}' was called with empty arguments. This tool requires parameters. \
+                     Please review the tool's schema and provide all required parameters.\n\n\
+                     This is likely a model error. The tool definition specifies required parameters, \
+                     but the model sent an empty arguments object.",
+                    tool_name
+                );
+
+                tracing::info!(
+                    "[⚙️ ] Injecting synthetic error result for tool '{}' (id: {})",
+                    tool_name,
+                    tool_id
+                );
+
+                finalized_turn.content.push(MessagePart::ToolResult {
+                    tool_call_id: tool_id.clone(),
+                    content: error_message,
+                    is_error: true,
+                    name: Some(tool_name.clone()),
+                    cache_control: None,
+                });
+            }
         }
 
         // Check for diff-only response if tools were advertised but none were seen
@@ -522,55 +587,6 @@ impl StreamHandler {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn process_stream_line(
-        line_result: std::result::Result<String, tokio_util::codec::LinesCodecError>,
-        metrics: &mut crate::logging::StreamMetric,
-        has_seen_tool_call: &mut bool,
-        accumulator: &mut TurnAccumulator,
-        tool_index_map: &mut HashMap<u32, String>,
-        conversation_id: &str,
-        tx: &mpsc::Sender<std::result::Result<axum::response::sse::Event, ParallaxError>>,
-        request_id: &str,
-        tx_tui: &tokio::sync::broadcast::Sender<crate::tui::TuiEvent>,
-        tools_were_advertised: bool,
-        buffered_pulses: &mut Vec<ProviderPulse>,
-        state: std::sync::Arc<AppState>,
-        model_id: String,
-    ) -> Option<bool> {
-        match line_result {
-            Ok(line) => {
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if data == "[DONE]" {
-                        tracing::debug!("[☁️  -> ⚙️ ] Stream end marker [DONE] received");
-                        return Some(false); // Success, not an error
-                    }
-
-                    return Self::handle_provider_line(
-                        data,
-                        metrics,
-                        has_seen_tool_call,
-                        accumulator,
-                        tool_index_map,
-                        conversation_id,
-                        tx,
-                        request_id,
-                        tx_tui,
-                        tools_were_advertised,
-                        buffered_pulses,
-                        state,
-                        model_id,
-                    )
-                    .await;
-                }
-            }
-            Err(e) => {
-                return Some(Self::handle_line_error(e, tx).await);
-            }
-        }
-        None
-    }
-
     async fn handle_line_error(
         e: tokio_util::codec::LinesCodecError,
         tx: &mpsc::Sender<std::result::Result<axum::response::sse::Event, ParallaxError>>,
@@ -601,6 +617,8 @@ impl StreamHandler {
         buffered_pulses: &mut Vec<ProviderPulse>,
         state: std::sync::Arc<AppState>,
         model_id: String,
+        content_scrubber: &mut crate::hardening::CursorTagScrubber,
+        reasoning_scrubber: &mut crate::hardening::CursorTagScrubber,
     ) -> Option<bool> {
         match crate::types::parse_provider_line(data) {
             LineEvent::Pulse(pulse) => {
@@ -616,6 +634,8 @@ impl StreamHandler {
                     tx_tui,
                     tools_were_advertised,
                     buffered_pulses,
+                    content_scrubber,
+                    reasoning_scrubber,
                 )
                 .await
             }
@@ -913,8 +933,20 @@ impl StreamHandler {
         tx_tui: &tokio::sync::broadcast::Sender<crate::tui::TuiEvent>,
         tools_were_advertised: bool,
         buffered_pulses: &mut Vec<ProviderPulse>,
+        content_scrubber: &mut crate::hardening::CursorTagScrubber,
+        reasoning_scrubber: &mut crate::hardening::CursorTagScrubber,
     ) -> Option<bool> {
         metrics.record_chunk(&pulse);
+
+        // Apply scrubbing to content and reasoning deltas
+        for choice in &mut pulse.choices {
+            if let Some(content) = &mut choice.delta.content {
+                *content = content_scrubber.scrub_chunk(content);
+            }
+            if let Some(reasoning) = choice.delta.extract_reasoning_mut() {
+                *reasoning = reasoning_scrubber.scrub_chunk(reasoning);
+            }
+        }
 
         // Detect transition: we only want to scrub once (first time tool calls show up)
         let had_seen_tools_before = *has_seen_tool_call;
