@@ -1,3 +1,7 @@
+use crate::constants::{
+    GEMINI_FLASH_FALLBACK, OPENROUTER_CHAT_COMPLETIONS, RETRYABLE_STATUS_CODES,
+    TOOLS_REQUIRING_ARGS,
+};
 use crate::db::DbPool;
 use crate::engine::ParallaxEngine;
 use crate::types::LineEvent;
@@ -11,36 +15,17 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, LinesCodec};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamState {
+    Initial,
+    BufferingUntilToolOrDone,
+    StreamingToClient,
+    Finished,
+}
+
 pub struct StreamHandler;
 
 const MAX_STREAM_LINES: usize = 100_000;
-
-// HTTP status codes that indicate retryable errors
-const RETRYABLE_STATUS_CODES: &[u16] = &[429, 500, 502, 503, 504, 520];
-
-// Tools that require arguments - used to detect suspicious empty argument tool calls
-const TOOLS_REQUIRING_ARGS: &[&str] = &[
-    "read_file",
-    "grep",
-    "glob_file_search",
-    "list_dir",
-    "codebase_search",
-    "run_terminal_cmd",
-    "web_search",
-    "fetch_mcp_resource",
-    "mcp_context7_query-docs",
-    "mcp_context7_resolve-library-id",
-    "mcp_docfork_docfork_search_docs",
-    "mcp_docfork_docfork_read_url",
-    "mcp_cursor-ide-browser_browser_click",
-    "mcp_cursor-ide-browser_browser_type",
-    "mcp_cursor-ide-browser_browser_select_option",
-    "mcp_cursor-ide-browser_browser_press_key",
-    "mcp_cursor-ide-browser_browser_navigate",
-];
-
-// Fallback model for Gemini when primary model fails
-const GEMINI_FLASH_FALLBACK: &str = "google/gemini-3-flash-preview-0814";
 
 impl StreamHandler {
     #[allow(clippy::too_many_arguments)]
@@ -104,7 +89,7 @@ impl StreamHandler {
         let mut tool_index_map = HashMap::<u32, String>::new();
         let mut metrics = crate::logging::StreamMetric::new();
         let mut line_count = 0;
-        let mut has_seen_tool_call = false;
+        let mut stream_state = StreamState::Initial;
         let mut buffered_pulses = Vec::new();
 
         while let Some(line_result) = lines_stream.next().await {
@@ -126,7 +111,7 @@ impl StreamHandler {
             let should_break = Self::process_stream_line(
                 line_result,
                 &mut metrics,
-                &mut has_seen_tool_call,
+                &mut stream_state,
                 &mut accumulator,
                 &mut tool_index_map,
                 &conversation_id,
@@ -157,7 +142,7 @@ impl StreamHandler {
             &metrics,
             start_time,
             tools_were_advertised,
-            has_seen_tool_call,
+            stream_state,
             state,
             &buffered_pulses,
         )
@@ -177,7 +162,7 @@ impl StreamHandler {
         metrics: &crate::logging::StreamMetric,
         start_time: std::time::Instant,
         tools_were_advertised: bool,
-        has_seen_tool_call: bool,
+        stream_state: StreamState,
         state: std::sync::Arc<AppState>,
         buffered_pulses: &[ProviderPulse],
     ) {
@@ -191,9 +176,7 @@ impl StreamHandler {
 
         let finalized_turn = accumulator.clone().finalize();
 
-        // Detect tool calls that ended up with empty arguments. This is almost always a provider/
-        // streaming delta issue (e.g., missing tool_call ids across chunks) and is worth surfacing.
-        // We only warn for tools that plausibly require parameters.
+        // Detect tool calls that ended up with empty arguments.
         let mut empty_arg_tools: Vec<(String, String)> = Vec::new();
         for part in &finalized_turn.content {
             if let crate::types::MessagePart::ToolCall { id, name, arguments, .. } = part {
@@ -233,8 +216,8 @@ impl StreamHandler {
             });
         }
 
-        // Check for diff-only response if tools were advertised but none were seen
-        if tools_were_advertised && !has_seen_tool_call {
+        // Check for diff-only response if tools were advertised but we're still buffering
+        if tools_were_advertised && (stream_state == StreamState::BufferingUntilToolOrDone || stream_state == StreamState::Initial) {
             let mut text_content = String::new();
             for part in &finalized_turn.content {
                 if let MessagePart::Text { content, .. } = part {
@@ -355,7 +338,7 @@ impl StreamHandler {
     async fn process_stream_line(
         line_result: std::result::Result<String, tokio_util::codec::LinesCodecError>,
         metrics: &mut crate::logging::StreamMetric,
-        has_seen_tool_call: &mut bool,
+        stream_state: &mut StreamState,
         accumulator: &mut TurnAccumulator,
         tool_index_map: &mut HashMap<u32, String>,
         conversation_id: &str,
@@ -372,13 +355,14 @@ impl StreamHandler {
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" {
                         tracing::debug!("[☁️  -> ⚙️ ] Stream end marker [DONE] received");
+                        *stream_state = StreamState::Finished;
                         return Some(true);
                     }
 
                     return Self::handle_provider_line(
                         data,
                         metrics,
-                        has_seen_tool_call,
+                        stream_state,
                         accumulator,
                         tool_index_map,
                         conversation_id,
@@ -395,6 +379,7 @@ impl StreamHandler {
             }
             Err(e) => {
                 Self::handle_line_error(e, tx).await;
+                *stream_state = StreamState::Finished;
                 return Some(true);
             }
         }
@@ -421,7 +406,7 @@ impl StreamHandler {
     async fn handle_provider_line(
         data: &str,
         metrics: &mut crate::logging::StreamMetric,
-        has_seen_tool_call: &mut bool,
+        stream_state: &mut StreamState,
         accumulator: &mut TurnAccumulator,
         tool_index_map: &mut HashMap<u32, String>,
         conversation_id: &str,
@@ -438,7 +423,7 @@ impl StreamHandler {
                 Self::handle_pulse_event(
                     pulse,
                     metrics,
-                    has_seen_tool_call,
+                    stream_state,
                     accumulator,
                     tool_index_map,
                     conversation_id,
@@ -452,13 +437,19 @@ impl StreamHandler {
                 None
             }
             crate::types::LineEvent::Error(err) => {
-                state.health.record_failure();
-                state.circuit_breaker.record_failure().await;
+                let _ = state
+                    .tx_kernel
+                    .send(crate::kernel::KernelCommand::UpdateHealth { success: false })
+                    .await;
+                let _ = state
+                    .tx_kernel
+                    .send(crate::kernel::KernelCommand::RecordCircuitFailure)
+                    .await;
                 Self::handle_provider_error(
                     data,
                     &err,
                     tx,
-                    *has_seen_tool_call,
+                    *stream_state == StreamState::StreamingToClient,
                     state,
                     conversation_id.to_string(),
                     model_id,
@@ -466,6 +457,7 @@ impl StreamHandler {
                     tx_tui.clone(),
                 )
                 .await;
+                *stream_state = StreamState::Finished;
                 Some(true)
             }
             crate::types::LineEvent::Unknown(_) => {
@@ -668,7 +660,7 @@ impl StreamHandler {
 
         let response = state
             .client
-            .post("https://openrouter.ai/api/v1/chat/completions")
+            .post(OPENROUTER_CHAT_COMPLETIONS)
             .header("Authorization", format!("Bearer {}", state.openrouter_key))
             .json(&outgoing_request)
             .send()
@@ -733,7 +725,7 @@ impl StreamHandler {
     async fn handle_pulse_event(
         mut pulse: ProviderPulse,
         metrics: &mut crate::logging::StreamMetric,
-        has_seen_tool_call: &mut bool,
+        stream_state: &mut StreamState,
         accumulator: &mut TurnAccumulator,
         tool_index_map: &mut HashMap<u32, String>,
         conversation_id: &str,
@@ -745,21 +737,40 @@ impl StreamHandler {
     ) {
         metrics.record_chunk(&pulse);
 
-        Self::sanitize_tool_calls(&mut pulse, has_seen_tool_call);
+        let has_tool_calls = pulse.choices.iter().any(|c| c.delta.tool_calls.is_some());
+
+        match stream_state {
+            StreamState::Initial => {
+                if has_tool_calls {
+                    *stream_state = StreamState::StreamingToClient;
+                } else if tools_were_advertised {
+                    *stream_state = StreamState::BufferingUntilToolOrDone;
+                } else {
+                    *stream_state = StreamState::StreamingToClient;
+                }
+            }
+            StreamState::BufferingUntilToolOrDone => {
+                if has_tool_calls {
+                    *stream_state = StreamState::StreamingToClient;
+                }
+            }
+            _ => {}
+        }
+
+        if *stream_state == StreamState::StreamingToClient {
+            Self::sanitize_tool_calls_in_place(&mut pulse);
+        }
 
         tracing::trace!("[☁️  -> ⚙️ ] Pulse: {:?}", pulse);
         Self::process_pulse(&pulse, conversation_id, tool_index_map, accumulator).await;
 
-        // If tools were advertised but we haven't seen any tool calls yet,
-        // we buffer the response instead of sending it directly to the client.
-        // This is to allow for the diff-only guard to trigger if needed.
-        if tools_were_advertised && !*has_seen_tool_call {
+        if *stream_state == StreamState::BufferingUntilToolOrDone {
             buffered_pulses.push(pulse);
             return;
         }
 
-        // Send buffered pulses if this is the first tool call
-        if *has_seen_tool_call && !buffered_pulses.is_empty() {
+        // Send buffered pulses if we just transitioned to streaming
+        if *stream_state == StreamState::StreamingToClient && !buffered_pulses.is_empty() {
             for p in buffered_pulses.drain(..) {
                 if let Ok(json) = serde_json::to_string(&p) {
                     if tx
@@ -821,6 +832,19 @@ impl StreamHandler {
                         content_delta: thought,
                         tool_call: None,
                     });
+                }
+            }
+        }
+    }
+
+    fn sanitize_tool_calls_in_place(pulse: &mut ProviderPulse) {
+        for choice in &mut pulse.choices {
+            if choice.delta.content.is_some() {
+                choice.delta.content = None;
+            }
+            if let Some(reason) = &choice.finish_reason {
+                if reason == "stop" {
+                    choice.finish_reason = Some("tool_calls".to_string());
                 }
             }
         }
@@ -894,7 +918,7 @@ impl StreamHandler {
         // Execute retry
         let response = state
             .client
-            .post("https://openrouter.ai/api/v1/chat/completions")
+            .post(OPENROUTER_CHAT_COMPLETIONS)
             .header("Authorization", format!("Bearer {}", state.openrouter_key))
             .json(&outgoing_request)
             .send()
@@ -939,22 +963,6 @@ impl StreamHandler {
         }
 
         Ok(())
-    }
-
-    fn sanitize_tool_calls(pulse: &mut ProviderPulse, has_seen_tool_call: &mut bool) {
-        if *has_seen_tool_call || pulse.choices.iter().any(|c| c.delta.tool_calls.is_some()) {
-            *has_seen_tool_call = true;
-            for choice in &mut pulse.choices {
-                if choice.delta.content.is_some() {
-                    choice.delta.content = None;
-                }
-                if let Some(reason) = &choice.finish_reason {
-                    if reason == "stop" {
-                        choice.finish_reason = Some("tool_calls".to_string());
-                    }
-                }
-            }
-        }
     }
 
     fn compute_and_send_cost(
@@ -1179,10 +1187,10 @@ impl StreamHandler {
         };
 
         tracing::info!(
-            "[⚙️  -> 🖱️ ] Stream Finished. Latency: {:?}\n\
-             [⚙️  -> 🖱️ ] Summary: {}\n\
-             [⚙️  -> 🖱️ ] Stats: {} chars text, {} chars thought, {} tools\n\
-             [⚙️  -> 🖱️ ] Tokens: {}",
+            "Stream Finished. Latency: {:?}\n\
+             Summary: {}\n\
+             Stats: {} chars text, {} chars thought, {} tools\n\
+             Tokens: {}",
             latency,
             parts_summary.join(", "),
             total_text_len,

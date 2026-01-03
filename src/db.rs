@@ -1,16 +1,10 @@
+use crate::constants::{DB_CLEANUP_RETENTION_DAYS, DB_PRAGMAS};
 use crate::types::{ParallaxError, Result};
 use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
 use std::path::Path;
 
 pub type DbPool = SqlitePool;
-
-// Database pragmas for performance and reliability
-const DB_PRAGMAS: &[&str] = &[
-    "PRAGMA journal_mode = WAL",
-    "PRAGMA synchronous = NORMAL",
-    "PRAGMA busy_timeout = 5000",
-];
 
 pub async fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
     let path_str = match path.as_ref().to_str() {
@@ -44,7 +38,7 @@ pub async fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
     verify_schema_version(&pool).await;
 
     // Run cleanup
-    if let Err(e) = cleanup_old_data(&pool, 7).await {
+    if let Err(e) = cleanup_old_data(&pool, DB_CLEANUP_RETENTION_DAYS).await {
         tracing::warn!("Database cleanup failed: {}", e);
     }
 

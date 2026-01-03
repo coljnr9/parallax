@@ -41,8 +41,7 @@ pub struct AppState {
     pub pricing: Arc<std::collections::HashMap<String, CostModel>>,
     pub disable_rescue: bool,
     pub args: Arc<Args>,
-    pub health: Arc<UpstreamHealth>,
-    pub circuit_breaker: Arc<crate::hardening::CircuitBreaker>,
+    pub tx_kernel: tokio::sync::mpsc::Sender<crate::kernel::KernelCommand>,
 }
 
 pub struct CostBreakdown {

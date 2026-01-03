@@ -1,31 +1,13 @@
-use serde_json::{Map, Value};
-
+use crate::constants::{DIFF_MARKERS, FORBIDDEN_PLAN_TERMS};
 use crate::types::{ParallaxError, Result};
+use axum::http as ax_http;
+use serde_json::{Map, Value};
 use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::RwLock;
-
-// Diff detection markers
-const DIFF_MARKERS: &[&str] = &[
-    "diff --git ",
-    "--- ",
-    "+++ ",
-    "@@ -",
-    "Index: ",
-    "Property changes on: ",
-];
-
-// Forbidden terms in plans that could trigger execution failures
-const FORBIDDEN_PLAN_TERMS: &[(&str, &str)] = &[
-    ("npm install", "package manager install"),
-    ("npm build", "package manager build"),
-    ("cargo build", "rust build"),
-    ("cargo check", "rust check"),
-    ("grep ", "ripgrep "),
-];
 
 pub struct RetryPolicy {
     pub max_attempts: u32,
@@ -116,7 +98,10 @@ impl CircuitBreaker {
 
     pub async fn check(&self) -> Result<()> {
         let mut state = self.state.write().await;
+        self.check_locked(&mut state).await
+    }
 
+    pub async fn check_locked(&self, state: &mut CircuitState) -> Result<()> {
         if *state == CircuitState::Open {
             let last_failure = match self.last_failure_time.try_read() {
                 Ok(last) => last,
@@ -141,12 +126,16 @@ impl CircuitBreaker {
             }
 
             return Err(ParallaxError::Upstream(
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                ax_http::StatusCode::SERVICE_UNAVAILABLE,
                 "Circuit breaker is OPEN".to_string(),
             )
             .into());
         }
         Ok(())
+    }
+
+    pub async fn state_raw_lock(&self) -> tokio::sync::RwLockReadGuard<'_, CircuitState> {
+        self.state.read().await
     }
 
     pub async fn record_success(&self) {

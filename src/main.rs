@@ -1,3 +1,6 @@
+use parallax::constants::{
+    AGENT_KEYWORDS, ASK_KEYWORDS, DEBUG_KEYWORDS, OPENROUTER_CHAT_COMPLETIONS, PLAN_KEYWORDS,
+};
 use parallax::db::*;
 use parallax::engine::*;
 use parallax::log_rotation::{LogRotationConfig, LogRotationManager};
@@ -148,12 +151,6 @@ fn detect_intent_tag(clean_content: &str) -> Option<crate::tui::Intent> {
     }
     None
 }
-
-// Intent detection keywords
-const PLAN_KEYWORDS: &[&str] = &[" PLAN MODE", " PLANNING MODE"];
-const AGENT_KEYWORDS: &[&str] = &[" AGENT MODE", " COMPOSER MODE", " BUILD MODE"];
-const DEBUG_KEYWORDS: &[&str] = &[" DEBUG MODE"];
-const ASK_KEYWORDS: &[&str] = &[" ASK MODE", " CHAT MODE"];
 
 fn detect_intent_keywords(search_window: &str) -> Option<crate::tui::Intent> {
     let content = search_window.to_uppercase();
@@ -464,25 +461,14 @@ async fn process_turn(
 
     match result {
         Ok(response) => {
-            state.health.record_success();
-            state.circuit_breaker.record_success().await;
-
-            // Emit health update
-            let _ = state.tx_tui.send(TuiEvent::UpstreamHealthUpdate {
-                consecutive_failures: state
-                    .health
-                    .consecutive_failures
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                total_requests: state
-                    .health
-                    .total_requests
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                failed_requests: state
-                    .health
-                    .failed_requests
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                degraded: false,
-            });
+            let _ = state
+                .tx_kernel
+                .send(crate::kernel::KernelCommand::UpdateHealth { success: true })
+                .await;
+            let _ = state
+                .tx_kernel
+                .send(crate::kernel::KernelCommand::RecordCircuitSuccess)
+                .await;
 
             let is_streaming: bool = outgoing_request.stream.unwrap_or(false);
             let tools_were_advertised = outgoing_request
@@ -508,25 +494,14 @@ async fn process_turn(
             }
         }
         Err(e) => {
-            state.health.record_failure();
-            state.circuit_breaker.record_failure().await;
-
-            // Emit health update
-            let _ = state.tx_tui.send(TuiEvent::UpstreamHealthUpdate {
-                consecutive_failures: state
-                    .health
-                    .consecutive_failures
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                total_requests: state
-                    .health
-                    .total_requests
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                failed_requests: state
-                    .health
-                    .failed_requests
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                degraded: true,
-            });
+            let _ = state
+                .tx_kernel
+                .send(crate::kernel::KernelCommand::UpdateHealth { success: false })
+                .await;
+            let _ = state
+                .tx_kernel
+                .send(crate::kernel::KernelCommand::RecordCircuitFailure)
+                .await;
 
             tracing::error!("[☁️  -> ⚙️ ] Request Error: {}", e);
 
@@ -550,7 +525,21 @@ async fn execute_upstream_request(
 ) -> Result<reqwest::Response> {
     let retry_policy = crate::hardening::RetryPolicy::new(state.args.max_retries, 100);
 
-    state.circuit_breaker.check().await?;
+    let (tx_resp, rx_resp) = tokio::sync::oneshot::channel();
+    let _ = state
+        .tx_kernel
+        .send(crate::kernel::KernelCommand::CheckCircuit { resp: tx_resp })
+        .await;
+    match rx_resp.await {
+        Ok(res) => res?,
+        Err(_) => {
+            return Err(ParallaxError::Internal(
+                "Kernel disconnected".to_string(),
+                tracing_error::SpanTrace::capture(),
+            )
+            .into())
+        }
+    }
 
     let state_clone = state.clone();
     let req_clone = outgoing_request.clone();
@@ -562,7 +551,7 @@ async fn execute_upstream_request(
             async move {
                 let response = state
                     .client
-                    .post("https://openrouter.ai/api/v1/chat/completions")
+                    .post(OPENROUTER_CHAT_COMPLETIONS)
                     .header("Authorization", format!("Bearer {}", state.openrouter_key))
                     .json(&req)
                     .send()
@@ -770,11 +759,16 @@ async fn main() {
         tracing::info!("Fetched pricing for {} models", pricing.len());
     }
 
-    let health = Arc::new(UpstreamHealth::default());
-    let circuit_breaker = Arc::new(crate::hardening::CircuitBreaker::new(
+    let (tx_kernel, rx_kernel) = mpsc::channel(100);
+    let kernel = crate::kernel::Kernel::new(
         args.circuit_breaker_threshold,
         std::time::Duration::from_secs(30),
-    ));
+        tx_tui.clone(),
+        rx_kernel,
+    );
+    tokio::spawn(async move {
+        kernel.run().await;
+    });
 
     let state = Arc::new(AppState {
         client,
@@ -784,8 +778,7 @@ async fn main() {
         pricing: Arc::new(pricing),
         disable_rescue: args.disable_rescue,
         args: args.clone(),
-        health,
-        circuit_breaker,
+        tx_kernel,
     });
 
     let app = Router::new()

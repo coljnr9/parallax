@@ -1,5 +1,7 @@
 pub mod agent_layer;
+pub mod constants;
 pub mod db;
+pub mod kernel;
 pub mod debug_utils;
 pub mod engine;
 pub mod hardening;

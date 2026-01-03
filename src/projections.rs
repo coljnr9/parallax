@@ -14,14 +14,11 @@ impl ProviderKind {
     /// Detect provider kind from a model name
     pub fn from_model_name(model_name: &str) -> Self {
         let lower = model_name.to_lowercase();
-        if lower.contains("gpt") || lower.contains("openai/") {
-            ProviderKind::OpenAi
-        } else if lower.contains("claude") || lower.contains("anthropic/") {
-            ProviderKind::Anthropic
-        } else if lower.contains("gemini") || lower.contains("google/") {
-            ProviderKind::Google
-        } else {
-            ProviderKind::Standard
+        match lower {
+            m if m.contains("gpt") || m.contains("openai/") => ProviderKind::OpenAi,
+            m if m.contains("claude") || m.contains("anthropic/") => ProviderKind::Anthropic,
+            m if m.contains("gemini") || m.contains("google/") => ProviderKind::Google,
+            _ => ProviderKind::Standard,
         }
     }
 }
