@@ -424,6 +424,8 @@ impl StreamHandler {
                 None
             }
             crate::types::LineEvent::Error(err) => {
+                state.health.record_failure();
+                state.circuit_breaker.record_failure().await;
                 Self::handle_provider_error(
                     data,
                     &err,

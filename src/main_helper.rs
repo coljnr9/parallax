@@ -45,44 +45,6 @@ pub struct AppState {
     pub circuit_breaker: Arc<crate::hardening::CircuitBreaker>,
 }
 
-impl AppState {
-    pub async fn new(args: Args) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(args.request_timeout_secs))
-            .connect_timeout(std::time::Duration::from_secs(args.connect_timeout_secs))
-            .build()
-            .map_err(ParallaxError::Network)?;
-
-        let openrouter_key = std::env::var("OPENROUTER_API_KEY")
-            .map_err(|_| ParallaxError::Internal("OPENROUTER_API_KEY not set".to_string(), tracing_error::SpanTrace::capture()))?;
-
-        let db = crate::db::init_db(&args.database).await?;
-        let (tx_tui, _) = tokio::sync::broadcast::channel(100);
-        
-        let pricing = Arc::new(std::collections::HashMap::new()); // Placeholder
-        let health = Arc::new(UpstreamHealth { 
-            consecutive_failures: 0.into(),
-            total_requests: 0.into(),
-            failed_requests: 0.into(),
-            last_success: None.into(),
-            last_failure: None.into(),
-        });
-        let circuit_breaker = Arc::new(crate::hardening::CircuitBreaker::new(args.circuit_breaker_threshold, std::time::Duration::from_secs(30)));
-
-        Ok(Self {
-            client,
-            openrouter_key,
-            db,
-            tx_tui,
-            pricing,
-            disable_rescue: args.disable_rescue,
-            args: Arc::new(args),
-            health,
-            circuit_breaker,
-        })
-    }
-}
-
 pub struct CostBreakdown {
     pub actual_cost: f64,
     pub potential_cost_no_cache: f64,
