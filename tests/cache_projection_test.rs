@@ -1,7 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use parallax::projections::*;
-    use parallax::specs::openai::*;
     use parallax::types::*;
     use serde_json::json;
 
@@ -58,7 +56,7 @@ mod tests {
             },
         ];
 
-        let context = ConversationContext {
+        let _context = ConversationContext {
             history,
             conversation_id: "test".to_string(),
             extra_body: json!({}),

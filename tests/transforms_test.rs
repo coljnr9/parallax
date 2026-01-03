@@ -1,7 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use parallax::ingress::RawTurn;
-
     #[tokio::test]
     async fn test_anthropic_xml_rescue_projection() {
         // Disabled due to missing testdata/fixtures/anthropic_xml_rescue.json

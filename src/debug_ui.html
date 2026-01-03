@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Parallax Debugger</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #0f172a; color: #e2e8f0; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #1e293b; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #475569; }
+    </style>
+</head>
+<body class="h-screen overflow-hidden">
+    <div id="root" class="h-full"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        const App = () => {
+            const [conversations, setConversations] = useState([]);
+            const [selectedCid, setSelectedCid] = useState(null);
+            const [conversationData, setConversationData] = useState(null);
+            const [selectedTurnId, setSelectedTurnId] = useState(null);
+            const [selectedTurnData, setSelectedTurnData] = useState(null);
+            const [selectedBlob, setSelectedBlob] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [turnDirections, setTurnDirections] = useState({});
+
+            useEffect(() => {
+                fetch('/debug/conversations')
+                    .then(res => res.json())
+                    .then(data => setConversations(data))
+                    .catch(err => console.error("Failed to fetch conversations", err));
+            }, []);
+
+            useEffect(() => {
+                if (selectedCid) {
+                    setLoading(true);
+                    fetch(`/debug/conversation/${selectedCid}`)
+                        .then(res => res.json())
+                        .then(data => {
+                            setConversationData(data);
+                            setLoading(false);
+                            // Detect directions for all turns
+                            const directions = {};
+                            data.turns.forEach((turn, idx) => {
+                                directions[turn.turn_id] = idx % 2 === 0 ? 'cursor' : 'assistant';
+                            });
+                            setTurnDirections(directions);
+                        });
+                }
+            }, [selectedCid]);
+
+            useEffect(() => {
+                if (selectedCid && selectedTurnId) {
+                    fetch(`/debug/conversation/${selectedCid}/turn/${selectedTurnId}`)
+                        .then(res => res.json())
+                        .then(data => setSelectedTurnData(data));
+                }
+            }, [selectedCid, selectedTurnId]);
+
+            const fetchBlob = (blobId) => {
+                fetch(`/debug/blob/${selectedCid}/${selectedTurnId}/${blobId}`)
+                    .then(res => res.text())
+                    .then(text => {
+                        try {
+                            const json = JSON.parse(text);
+                            setSelectedBlob(JSON.stringify(json, null, 2));
+                        } catch {
+                            setSelectedBlob(text);
+                        }
+                    });
+            };
+
+            return (
+                <div className="flex h-full font-sans">
+                    {/* Sidebar: Conversations */}
+                    <div className="w-80 bg-slate-900 border-r border-slate-800 flex flex-col h-full">
+                        <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+                            <h1 className="text-lg font-bold text-emerald-500">Parallax Debug</h1>
+                            <span className="text-xs bg-slate-800 px-2 py-1 rounded text-slate-400">v0.1.0</span>
+                        </div>
+                        <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
+                            {conversations.map(c => (
+                                <button
+                                    key={c.conversation_id}
+                                    onClick={() => { setSelectedCid(c.conversation_id); setSelectedTurnId(null); setSelectedTurnData(null); setSelectedBlob(null); }}
+                                    className={`w-full text-left p-3 rounded-lg transition-all ${selectedCid === c.conversation_id ? 'bg-emerald-600/20 border border-emerald-500/50' : 'hover:bg-slate-800 border border-transparent'}`}
+                                >
+                                    <div className="flex justify-between items-center mb-1">
+                                        <span className="font-mono text-sm font-bold text-slate-200">{c.conversation_id.substring(0, 8)}</span>
+                                        <span className="text-[10px] text-slate-500 font-mono">
+                                            {new Date(c.last_updated_ms).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})}
+                                        </span>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-xs text-slate-500">{c.turns.length} turns</span>
+                                        {c.issues.reasoning_leak > 0 && <span className="w-2 h-2 rounded-full bg-red-500" title="Reasoning Leak"></span>}
+                                        {(c.issues.tool_args_empty > 0 || c.issues.tool_args_repaired > 0) && <span className="w-2 h-2 rounded-full bg-yellow-500" title="Tool Issue"></span>}
+                                    </div>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* Middle: Turns List */}
+                    <div className="w-96 bg-slate-950 border-r border-slate-800 flex flex-col h-full">
+                        <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/50">
+                            <h2 className="text-sm font-bold uppercase tracking-wider text-slate-400">Turns</h2>
+                            {conversationData && <span className="text-xs text-slate-500 font-mono">{conversationData.conversation_id.substring(0, 8)}</span>}
+                        </div>
+                        <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-2">
+                            {conversationData?.turns.map((t, idx) => (
+                                <button
+                                    key={t.turn_id}
+                                    onClick={() => { setSelectedTurnId(t.turn_id); setSelectedBlob(null); }}
+                                    className={`w-full text-left p-4 rounded-xl transition-all ${selectedTurnId === t.turn_id ? 'bg-slate-800 ring-1 ring-emerald-500/30 shadow-lg' : 'hover:bg-slate-900 shadow-sm border border-slate-800/50'}`}
+                                >
+                                    <div className="flex items-center justify-between mb-3">
+                                        <div className="flex items-center gap-2">
+                                            <div className="px-2 py-1 bg-emerald-950/50 border border-emerald-500/30 rounded-md">
+                                                <span className="text-[10px] font-bold text-emerald-400 font-mono">#{idx + 1}</span>
+                                            </div>
+                                            <div className={`px-2 py-1 rounded-md border ${turnDirections[t.turn_id] === 'cursor' ? 'bg-blue-950/50 border-blue-500/30' : 'bg-purple-950/50 border-purple-500/30'}`}>
+                                                <span className={`text-[10px] font-bold font-mono ${turnDirections[t.turn_id] === 'cursor' ? 'text-blue-400' : 'text-purple-400'}`}>
+                                                    {turnDirections[t.turn_id] === 'cursor' ? '🔷 Cursor' : '🤖 Assistant'}
+                                                </span>
+                                            </div>
+                                            <div className="px-2 py-1 bg-slate-800/50 border border-slate-700 rounded-md">
+                                                <span className="text-[10px] font-bold text-slate-300 font-mono">{t.model_id.split('/').pop()}</span>
+                                            </div>
+                                        </div>
+                                        <span className="text-[10px] text-slate-500 font-mono">{t.request_id.substring(0, 8)}</span>
+                                    </div>
+                                    <div className="text-xs text-slate-400 line-clamp-2">
+                                        {t.flavor} • {new Date(t.started_at_ms).toLocaleTimeString()}
+                                    </div>
+                                </button>
+                            ))}
+                            {!selectedCid && <div className="h-full flex items-center justify-center text-slate-600 text-sm italic">Select a conversation</div>}
+                        </div>
+                    </div>
+
+                    {/* Right: Turn Details */}
+                    <div className="flex-1 bg-slate-950 flex flex-col h-full overflow-hidden">
+                        {selectedTurnData ? (
+                            <div className="flex flex-col h-full overflow-hidden">
+                                <div className="p-6 border-b border-slate-800 bg-slate-900/30">
+                                    <div className="flex justify-between items-start mb-4">
+                                        <div>
+                                            <h2 className="text-2xl font-bold text-slate-100 mb-1">Turn Details</h2>
+                                            <div className="flex items-center gap-4">
+                                                <div className="text-xs text-slate-400">RID: <span className="text-emerald-400 font-mono">{selectedTurnData.request_id}</span></div>
+                                                <div className="text-xs text-slate-400">Model: <span className="text-emerald-400 font-mono">{selectedTurnData.model_id}</span></div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {selectedTurnData.issues.length > 0 && (
+                                        <div className="bg-red-950/20 border border-red-500/30 rounded-lg p-4 mb-2">
+                                            <h3 className="text-xs font-bold text-red-400 uppercase tracking-widest mb-3">Issues Detected</h3>
+                                            <div className="space-y-2">
+                                                {selectedTurnData.issues.map((issue, i) => (
+                                                    <div key={i} className="flex items-start gap-2 text-sm">
+                                                        <span className="px-1.5 py-0.5 bg-red-900/40 rounded text-[10px] font-bold text-red-400 mt-0.5">{issue.kind}</span>
+                                                        <span className="text-slate-300">{issue.message}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {(selectedTurnData.cursor_tags?.registered?.length > 0 || selectedTurnData.cursor_tags?.unregistered?.length > 0 || selectedTurnData.cursor_tags?.leaks?.length > 0) && (
+                                        <div className="bg-cyan-950/20 border border-cyan-500/30 rounded-lg p-4 mb-2">
+                                            <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-widest mb-3">Cursor Tags</h3>
+                                            {selectedTurnData.cursor_tags?.registered?.length > 0 && (
+                                                <div className="mb-3">
+                                                    <div className="text-[10px] font-bold text-cyan-300 mb-1">✓ Registered</div>
+                                                    <div className="flex flex-wrap gap-1">
+                                                        {selectedTurnData.cursor_tags.registered.map((tag, i) => (
+                                                            <span key={i} className="px-2 py-1 bg-cyan-900/40 border border-cyan-500/50 rounded text-[10px] text-cyan-300 font-mono">
+                                                                &lt;{tag.tag}&gt; ({tag.count})
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {selectedTurnData.cursor_tags?.unregistered?.length > 0 && (
+                                                <div className="mb-3">
+                                                    <div className="text-[10px] font-bold text-yellow-300 mb-1">⚠ Unregistered</div>
+                                                    <div className="flex flex-wrap gap-1">
+                                                        {selectedTurnData.cursor_tags.unregistered.map((tag, i) => (
+                                                            <span key={i} className="px-2 py-1 bg-yellow-900/40 border border-yellow-500/50 rounded text-[10px] text-yellow-300 font-mono">
+                                                                &lt;{tag.tag}&gt; ({tag.count})
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {selectedTurnData.cursor_tags?.leaks?.length > 0 && (
+                                                <div>
+                                                    <div className="text-[10px] font-bold text-orange-300 mb-1">🔴 Leaks</div>
+                                                    <div className="flex flex-wrap gap-1">
+                                                        {selectedTurnData.cursor_tags.leaks.map((tag, i) => (
+                                                            <span key={i} className="px-2 py-1 bg-orange-900/40 border border-orange-500/50 rounded text-[10px] text-orange-300 font-mono">
+                                                                &lt;{tag.tag}&gt; ({tag.count})
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="flex-1 overflow-y-auto custom-scrollbar p-6">
+                                    <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4">Lifecycle Stages</h3>
+                                    <div className="grid grid-cols-1 gap-4 mb-8">
+                                        {selectedTurnData.stages.map(stage => (
+                                            <div key={stage.name} className="bg-slate-900/50 border border-slate-800 rounded-xl overflow-hidden group hover:border-slate-700 transition-colors">
+                                                <div className="flex items-center justify-between p-4">
+                                                    <div className="flex items-center gap-3">
+                                                        <div className={`w-2 h-2 rounded-full ${stage.blob_ref ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
+                                                        <span className="font-mono text-sm font-bold text-slate-200">{stage.name}</span>
+                                                        <span className="text-[10px] uppercase font-bold text-slate-600 bg-slate-800 px-1.5 py-0.5 rounded">{stage.kind}</span>
+                                                    </div>
+                                                    {stage.blob_ref && (
+                                                        <button 
+                                                            onClick={() => fetchBlob(stage.blob_ref.blob_id)}
+                                                            className="text-xs px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition-all shadow-lg shadow-emerald-900/20 font-bold"
+                                                        >
+                                                            View Blob
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+
+                                    {selectedBlob && (
+                                        <div className="animate-in fade-in slide-in-from-bottom-4 duration-300">
+                                            <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4">Blob Inspector</h3>
+                                            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 font-mono text-xs overflow-x-auto whitespace-pre-wrap text-emerald-100 shadow-2xl min-h-[500px] leading-relaxed">
+                                                {selectedBlob}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="flex-1 flex flex-col items-center justify-center text-slate-700 space-y-4">
+                                <div className="w-16 h-16 border-2 border-slate-800 rounded-2xl flex items-center justify-center">
+                                    <svg className="w-8 h-8 opacity-20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                    </svg>
+                                </div>
+                                <p className="text-sm font-medium italic">Select a turn to inspect lifecycle stages</p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
+

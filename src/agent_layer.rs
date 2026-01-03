@@ -6,12 +6,35 @@ use tracing_subscriber::registry::LookupSpan;
 
 pub struct AgentNdjsonLayer<W: Write + Send + Sync + 'static> {
     writer: std::sync::Mutex<W>,
+    request_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    conversation_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    turn_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl<W: Write + Send + Sync + 'static> AgentNdjsonLayer<W> {
     pub fn new(writer: W) -> Self {
         Self {
             writer: std::sync::Mutex::new(writer),
+            request_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            conversation_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            turn_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    pub fn set_request_context(
+        &self,
+        request_id: String,
+        conversation_id: String,
+        turn_id: String,
+    ) {
+        if let Ok(mut rid) = self.request_id.lock() {
+            *rid = Some(request_id);
+        }
+        if let Ok(mut cid) = self.conversation_id.lock() {
+            *cid = Some(conversation_id);
+        }
+        if let Ok(mut tid) = self.turn_id.lock() {
+            *tid = Some(turn_id);
         }
     }
 }
@@ -46,11 +69,19 @@ where
             None => "none".to_string(),
         };
 
+        // Capture current request context
+        let request_id = self.request_id.lock().ok().and_then(|r| r.clone());
+        let conversation_id = self.conversation_id.lock().ok().and_then(|c| c.clone());
+        let turn_id = self.turn_id.lock().ok().and_then(|t| t.clone());
+
         let output = json!({
             "timestamp": timestamp,
             "level": level,
             "target": target,
             "trace_id": trace_id,
+            "request_id": request_id,
+            "conversation_id": conversation_id,
+            "turn_id": turn_id,
             "span_list": span_list,
             "fields": fields,
         });

@@ -24,6 +24,8 @@ impl StreamHandler {
         conversation_id: &str,
         request_id: &str,
         start_time: std::time::Instant,
+        started_at_ms: u64,
+        tid: &str,
     ) {
         let finalized_turn_val = match serde_json::to_value(finalized_turn) {
             Ok(v) => v,
@@ -37,6 +39,98 @@ impl StreamHandler {
             &finalized_turn_val,
         )
         .await;
+
+        // Update bundle summaries
+        let bundle_manager = crate::debug_bundle::BundleManager::new("debug_capture");
+
+        // Build stages from what we know
+        let final_blob_ref = Some(crate::debug_bundle::BlobRef {
+            blob_id: "final".to_string(),
+            content_type: "application/json".to_string(),
+            approx_bytes: finalized_turn_val.to_string().len() as u64,
+            file_name: Some("final.json".to_string()),
+            sha256: None,
+            written_at_ms: None,
+        });
+
+        let stages_vec: Vec<crate::debug_bundle::StageIndex> = vec![
+            crate::debug_bundle::StageIndex {
+                name: "final".to_string(),
+                kind: crate::debug_bundle::StageKind::Snapshot,
+                summary: serde_json::json!({
+                    "content_parts": finalized_turn.content.len(),
+                    "tool_calls": finalized_turn.content.iter().filter(|p| matches!(p, crate::types::MessagePart::ToolCall { .. })).count(),
+                    "text_chars": finalized_turn.content.iter().filter_map(|p| {
+                        if let crate::types::MessagePart::Text { content, .. } = p {
+                            Some(content.len())
+                        } else {
+                            None
+                        }
+                    }).sum::<usize>(),
+                }),
+                blob_ref: final_blob_ref.clone(),
+            },
+        ];
+
+        // Index tool calls from finalized turn
+        let (tool_calls, tool_results) = crate::debug_bundle::BundleManager::index_tool_calls(
+            finalized_turn,
+            final_blob_ref.clone(),
+        );
+
+        // Extract cursor tags from finalized turn (will be merged with ingress tags via merge_and_write_turn)
+        let cursor_tags = crate::debug_bundle::BundleManager::extract_cursor_tags(
+            &serde_json::json!({}), // Empty ingress (will be preserved from initial write)
+            Some(finalized_turn),
+        );
+
+        // Build span summary from trace events
+        let span_summary = bundle_manager
+            .build_span_summary(conversation_id, tid, request_id)
+            .await;
+
+        let detail = crate::debug_bundle::TurnDetail {
+            turn_id: tid.to_string(),
+            request_id: request_id.to_string(),
+            model_id: model_id.to_string(),
+            flavor: "streaming".to_string(),
+            started_at_ms,
+            ended_at_ms: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            ),
+            stages: stages_vec,
+            tool_calls,
+            tool_results,
+            cursor_tags: cursor_tags.clone(),
+            issues: bundle_manager.detect_issues(finalized_turn, &[], &cursor_tags),
+            trace_id: None, // Trace ID would be extracted from span_summary if needed
+            span_summary,
+            user_query: None, // Will be preserved from initial write via merge
+            role: Some("Assistant".to_string()),
+            user_query_tags: None, // Will be preserved from initial write via merge
+        };
+        let _ = bundle_manager
+            .merge_and_write_turn(conversation_id, tid, &detail)
+            .await;
+
+        // Update conversation summary (but don't re-write turn.json, merge_and_write_turn already did that)
+        let summary_update = crate::debug_bundle::TurnSummary {
+            turn_id: tid.to_string(),
+            request_id: request_id.to_string(),
+            model_id: model_id.to_string(),
+            flavor: "streaming".to_string(),
+            started_at_ms: detail.started_at_ms,
+            ended_at_ms: detail.ended_at_ms,
+            issues: crate::debug_bundle::BundleManager::sum_issues_public(&detail.issues),
+            role: Some("Assistant".to_string()),
+        };
+        let _ = bundle_manager
+            .update_conversation_summary_only(conversation_id, summary_update)
+            .await;
+
         let usage_owned = usage.cloned();
         Self::log_finalized_turn(finalized_turn, &usage_owned, start_time.elapsed());
     }
@@ -56,7 +150,7 @@ impl StreamHandler {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
     pub async fn handle_stream<R>(
         mut lines_stream: FramedRead<tokio_util::io::StreamReader<R, Bytes>, LinesCodec>,
         db: DbPool,
@@ -70,6 +164,7 @@ impl StreamHandler {
         _disable_rescue: bool,
         tools_were_advertised: bool,
         state: std::sync::Arc<AppState>,
+        tid: String,
     ) where
         R: Stream<Item = std::result::Result<Bytes, std::io::Error>> + Unpin + Send,
     {
@@ -88,7 +183,7 @@ impl StreamHandler {
 
         while let Some(line_result) = lines_stream.next().await {
             let now = std::time::Instant::now();
-            
+
             if now.duration_since(last_activity_at) > std::time::Duration::from_secs(30) {
                 tracing::warn!(
                     idle_secs = %now.duration_since(last_activity_at).as_secs(),
@@ -96,7 +191,7 @@ impl StreamHandler {
                     "stream.idle_upstream: Long silence from provider"
                 );
             }
-            
+
             last_activity_at = now;
 
             if first_upstream_line_at.is_none() {
@@ -110,7 +205,9 @@ impl StreamHandler {
             // Heartbeat every 50 lines if we are still buffering
             if !has_seen_tool_call && line_count % 50 == 0 {
                 let _ = tx
-                    .send(Ok(axum::response::sse::Event::default().comment("parallax-heartbeat")))
+                    .send(Ok(
+                        axum::response::sse::Event::default().comment("parallax-heartbeat")
+                    ))
                     .await;
             }
 
@@ -145,14 +242,14 @@ impl StreamHandler {
             )
             .await;
 
-        if let Some(is_error) = should_break {
-            if is_error {
-                end_reason = "upstream_error";
-            } else {
-                end_reason = "finished_done_marker";
+            if let Some(is_error) = should_break {
+                if is_error {
+                    end_reason = "upstream_error";
+                } else {
+                    end_reason = "finished_done_marker";
+                }
+                break;
             }
-            break;
-        }
 
             if first_client_send_at.is_none() && !buffered_pulses.is_empty() {
                 first_client_send_at = Some(std::time::Instant::now());
@@ -160,11 +257,20 @@ impl StreamHandler {
             }
         }
 
-        if last_activity_at.elapsed() > std::time::Duration::from_secs(60) && end_reason == "upstream_eof" {
+        if last_activity_at.elapsed() > std::time::Duration::from_secs(60)
+            && end_reason == "upstream_eof"
+        {
             end_reason = "upstream_stalled_timeout";
         }
 
         tracing::info!(reason = %end_reason, lines = %line_count, "stream.end: Closing stream task");
+
+        // Capture epoch timestamp for accurate turn timing
+        let started_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+            .saturating_sub(start_time.elapsed().as_millis() as u64);
 
         Self::finish_stream(
             &accumulator,
@@ -177,10 +283,12 @@ impl StreamHandler {
             &tx,
             &metrics,
             start_time,
+            started_at_ms,
             tools_were_advertised,
             has_seen_tool_call,
             state,
             &buffered_pulses,
+            &tid,
         )
         .await;
     }
@@ -197,10 +305,12 @@ impl StreamHandler {
         tx: &mpsc::Sender<std::result::Result<axum::response::sse::Event, ParallaxError>>,
         metrics: &crate::logging::StreamMetric,
         start_time: std::time::Instant,
+        started_at_ms: u64,
         tools_were_advertised: bool,
         has_seen_tool_call: bool,
         state: std::sync::Arc<AppState>,
         buffered_pulses: &[ProviderPulse],
+        tid: &str,
     ) {
         if let Some(usage) = &accumulator.usage {
             Self::compute_and_send_cost(model_id, request_id, usage, pricing, tx_tui);
@@ -212,12 +322,31 @@ impl StreamHandler {
 
         let finalized_turn = accumulator.clone().finalize();
 
+        // Phase 2: Save final turn to bundle
+        let bundle_manager = crate::debug_bundle::BundleManager::new("debug_capture");
+        if let Ok(finalized_json) = serde_json::to_value(&finalized_turn) {
+            let _ = bundle_manager
+                .write_blob(
+                    conversation_id,
+                    tid,
+                    "final",
+                    finalized_json.to_string().as_bytes(),
+                )
+                .await;
+        }
+
         // Detect tool calls that ended up with empty arguments. This is almost always a provider/
         // streaming delta issue (e.g., missing tool_call ids across chunks) and is worth surfacing.
         // We only warn for tools that plausibly require parameters.
         let mut empty_arg_tools: Vec<(String, String)> = Vec::new();
         for part in &finalized_turn.content {
-            if let crate::types::MessagePart::ToolCall { id, name, arguments, .. } = part {
+            if let crate::types::MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+                ..
+            } = part
+            {
                 let is_empty_object = match arguments.as_object() {
                     Some(m) => m.is_empty(),
                     None => false,
@@ -378,6 +507,8 @@ impl StreamHandler {
             conversation_id,
             request_id,
             start_time,
+            started_at_ms,
+            tid,
         )
         .await;
 
@@ -795,7 +926,8 @@ impl StreamHandler {
             // We already buffered/accumulated earlier deltas for this turn.
             // Scrub only explicit protocol leak patterns so we don't preserve "Assistant:" and
             // "<xai:function_call ...>" into the final message history.
-            accumulator.text_buffer = crate::hardening::scrub_tool_protocol_leaks(&accumulator.text_buffer);
+            accumulator.text_buffer =
+                crate::hardening::scrub_tool_protocol_leaks(&accumulator.text_buffer);
             accumulator.thought_buffer =
                 crate::hardening::scrub_tool_protocol_leaks(&accumulator.thought_buffer);
         }
@@ -829,7 +961,9 @@ impl StreamHandler {
         // Re-serialize the sanitized pulse
         if let Ok(sanitized_json) = serde_json::to_string(&pulse) {
             if tx
-                .send(Ok(axum::response::sse::Event::default().data(sanitized_json)))
+                .send(Ok(
+                    axum::response::sse::Event::default().data(sanitized_json)
+                ))
                 .await
                 .is_err()
             {

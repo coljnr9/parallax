@@ -4,6 +4,7 @@
 pub mod agent_layer;
 pub mod constants;
 pub mod db;
+pub mod debug_bundle;
 pub mod debug_utils;
 pub mod engine;
 pub mod hardening;
@@ -25,6 +26,7 @@ pub mod rescue;
 pub mod specs;
 pub mod str_utils;
 pub mod streaming;
+pub mod tag_extract;
 pub mod tool_schema;
 pub mod tui;
 pub mod types;

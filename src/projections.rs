@@ -398,12 +398,20 @@ impl OpenRouterAdapter {
 
         OpenAiMessage::Assistant {
             content: final_content,
-            reasoning: if thoughts.is_empty() { None } else { Some(thoughts.join("\n")) },
+            reasoning: if thoughts.is_empty() {
+                None
+            } else {
+                Some(thoughts.join("\n"))
+            },
             tool_calls,
         }
     }
 
-    fn apply_gemini_fix(text_content: &str, flavor: &dyn ProviderFlavor, tool_calls: &[OpenAiToolCall]) -> Option<String> {
+    fn apply_gemini_fix(
+        text_content: &str,
+        flavor: &dyn ProviderFlavor,
+        tool_calls: &[OpenAiToolCall],
+    ) -> Option<String> {
         // GEMINI FIX: Gemini requires every message to have at least one "parts" field.
         // When an assistant message has tool calls but no text content, we must provide
         // at least an empty string to ensure OpenRouter can transform it into a valid
@@ -442,9 +450,7 @@ impl OpenRouterAdapter {
             None => {
                 let found = record.content.iter().find_map(|p| {
                     if let MessagePart::ToolResult {
-                        tool_call_id,
-                        name,
-                        ..
+                        tool_call_id, name, ..
                     } = p
                     {
                         Some((tool_call_id.clone(), name.clone()))

@@ -294,7 +294,8 @@ mod tests {
         assert_eq!(got_no_leaks, "This is a normal line.");
 
         // Relaxed matching for lines starting with "Assistant:"
-        let input_relaxed = "Assistant: 1|# Terminus System Architecture\n<xai:function_call name=\"read_file\">";
+        let input_relaxed =
+            "Assistant: 1|# Terminus System Architecture\n<xai:function_call name=\"read_file\">";
         let got_relaxed = scrub_tool_protocol_leaks(input_relaxed);
         assert_eq!(got_relaxed, "");
     }

@@ -91,7 +91,7 @@ impl ParallaxEngine {
         let raw: RawTurn = serde_json::from_value(payload)
             .map_err(|e| ParallaxError::InvalidIngress(e.to_string()))?;
 
-        let anchor_hash = raw.generate_anchor_hash()?;
+        let anchor_hash = raw.extract_conversation_id()?;
         let request_id = raw.extract_request_id();
 
         // Pass 1: Build records and infer roles
@@ -281,7 +281,7 @@ impl ParallaxEngine {
                     tool_call_id: call_id,
                     content: content_str,
                     is_error: false,
-                    name: None,
+                    name: raw_rec.name.clone(),
                     cache_control: None,
                 }];
             }

@@ -56,6 +56,6 @@ fn tool_call_arguments_are_preserved_when_id_missing_on_followup_chunk() {
         assert_eq!(name, "read_file");
         assert_eq!(args["target_file"], "/tmp/foo");
     } else {
-        assert!(false, "Expected one tool call");
+        unreachable!("Expected one tool call");
     }
 }

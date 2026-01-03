@@ -225,7 +225,8 @@ impl RawTurn {
 
     pub fn generate_anchor_hash(&self) -> Result<String> {
         let mut hasher = Sha256::new();
-        hasher.update(self.model.model_name());
+        // NOTE: We intentionally do NOT include the model name in the fallback conversation ID hash.
+        // Cursor may omit metadata on some paths; excluding the model keeps the fallback CID stable across model switches.
         if let Some(u) = &self.user {
             hasher.update(u);
         }
@@ -317,5 +318,24 @@ impl RawTurn {
             },
             None => uuid::Uuid::new_v4().to_string(),
         }
+    }
+
+    pub fn extract_conversation_id(&self) -> Result<String> {
+        // Prefer Cursor's conversation ID if available - this is the authoritative source
+        if let Some(meta) = &self.metadata {
+            if let Some(cursor_cid) = &meta.conversation_id {
+                tracing::info!(
+                    "[⚙️  -> ⚙️ ] Identify: Cursor CID [{}...]",
+                    str_utils::prefix_chars(cursor_cid, 8)
+                );
+                return Ok(cursor_cid.clone());
+            }
+        }
+
+        // Fall back to hash-based ID for non-Cursor clients or when metadata is missing
+        tracing::warn!(
+            "[⚙️  -> ⚙️ ] No cursorConversationId in metadata, falling back to anchor hash"
+        );
+        self.generate_anchor_hash()
     }
 }

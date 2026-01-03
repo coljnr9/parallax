@@ -17,6 +17,7 @@ use parallax::projections::ProviderFlavor;
 use parallax::projections::StandardFlavor;
 use parallax::streaming::StreamHandler;
 
+use axum::response::sse::KeepAlive;
 use axum::{
     extract::State,
     http as ax_http, middleware,
@@ -24,7 +25,6 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use axum::response::sse::KeepAlive;
 use clap::Parser;
 use futures_util::StreamExt;
 use std::sync::Arc;
@@ -250,17 +250,6 @@ async fn chat_completions_handler(
         span.record("cf.ip", forwarded);
     }
 
-    if state.args.enable_debug_capture {
-        crate::debug_utils::capture_debug_snapshot(
-            "ingress_raw",
-            "unknown",
-            "unknown",
-            "unknown",
-            &payload,
-        )
-        .await;
-    }
-
     if let Err(resp) = validate_payload(&payload) {
         span.record("shim.outcome", "client_error");
         return *resp;
@@ -283,6 +272,19 @@ async fn chat_completions_handler(
     span.record("request_id", &rid);
     span.record("model.target", &model_id);
 
+    let cid = context.conversation_id.clone();
+    let turn_id_uuid = uuid::Uuid::new_v4().to_string();
+    let tid = turn_id_uuid.clone();
+
+    // Phase 2: Initialize bundle
+    let bundle_manager = crate::debug_bundle::BundleManager::new("debug_capture");
+    let _ = bundle_manager.ensure_turn_dir(&cid, &tid).await;
+
+    // Always write ingress_raw blob so users can see their messages
+    let _ = bundle_manager
+        .write_blob(&cid, &tid, "ingress_raw", payload.to_string().as_bytes())
+        .await;
+
     // Capture the lifted context for debugging
     let lifted_json = match serde_json::to_value(&context) {
         Ok(val) => val,
@@ -292,24 +294,112 @@ async fn chat_completions_handler(
         }
     };
     if state.args.enable_debug_capture {
-        crate::debug_utils::capture_debug_snapshot(
-            "lifted",
-            &rid,
-            &context.conversation_id,
-            &model_id,
-            &lifted_json,
-        )
-        .await;
+        let _ = bundle_manager
+            .write_blob(&cid, &tid, "lifted", lifted_json.to_string().as_bytes())
+            .await;
+        crate::debug_utils::capture_debug_snapshot("lifted", &rid, &cid, &model_id, &lifted_json)
+            .await;
     }
-
-    let cid = context.conversation_id.clone();
-    let turn_id = crate::logging::get_turn_id();
 
     let intent = detect_intent(&model_id, &payload);
 
     let mut recorder =
-        crate::debug_utils::FlightRecorder::new(&turn_id, &rid, &cid, &model_id, flavor.name());
+        crate::debug_utils::FlightRecorder::new(&tid, &rid, &cid, &model_id, flavor.name());
     recorder.record_stage("ingress_raw", payload.clone());
+
+    // Phase 2: Start TurnDetail
+    let start_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let mut stages_vec: Vec<crate::debug_bundle::StageIndex> = Vec::new();
+
+    // Extract useful metadata from ingress payload for summary
+    let messages_len = payload
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let tools_len = payload
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    stages_vec.push(crate::debug_bundle::StageIndex {
+        name: "ingress_raw".to_string(),
+        kind: crate::debug_bundle::StageKind::Snapshot,
+        summary: serde_json::json!({
+            "len": payload.to_string().len(),
+            "messages_len": messages_len,
+            "tools_len": tools_len,
+        }),
+        blob_ref: Some(crate::debug_bundle::BlobRef {
+            blob_id: "ingress_raw".to_string(),
+            content_type: "application/json".to_string(),
+            approx_bytes: payload.to_string().len() as u64,
+            file_name: Some("ingress_raw.json".to_string()),
+            sha256: None,
+            written_at_ms: None,
+        }),
+    });
+
+    if state.args.enable_debug_capture {
+        stages_vec.push(crate::debug_bundle::StageIndex {
+            name: "lifted".to_string(),
+            kind: crate::debug_bundle::StageKind::Snapshot,
+            summary: serde_json::json!({
+                "history_len": context.history.len(),
+            }),
+            blob_ref: Some(crate::debug_bundle::BlobRef {
+                blob_id: "lifted".to_string(),
+                content_type: "application/json".to_string(),
+                approx_bytes: lifted_json.to_string().len() as u64,
+                file_name: Some("lifted.json".to_string()),
+                sha256: None,
+                written_at_ms: None,
+            }),
+        });
+    }
+
+    let user_query_opt = crate::debug_bundle::BundleManager::extract_user_query(&payload);
+
+    // Compute tag deltas if user_query exists
+    let user_query_tags = if let Some(ref user_query) = user_query_opt {
+        bundle_manager
+            .compute_user_query_tag_deltas(&cid, user_query)
+            .await
+    } else {
+        None
+    };
+
+    // Extract cursor tags from ingress payload (final will be added during finalization)
+    let cursor_tags = crate::debug_bundle::BundleManager::extract_cursor_tags(&payload, None);
+
+    let turn_detail = crate::debug_bundle::TurnDetail {
+        turn_id: tid.clone(),
+        request_id: rid.clone(),
+        model_id: model_id.clone(),
+        flavor: flavor.name().to_string(),
+        started_at_ms: start_ms,
+        ended_at_ms: None,
+        stages: stages_vec,
+        tool_calls: Vec::new(),
+        tool_results: Vec::new(),
+        cursor_tags,
+        issues: Vec::new(),
+        trace_id: None,
+        span_summary: None,
+        user_query: user_query_opt,
+        role: Some("User".to_string()),
+        user_query_tags,
+    };
+
+    // Initial write
+    let _ = bundle_manager
+        .update_summaries(&cid, &tid, &turn_detail)
+        .await;
 
     if let Err(e) = ParallaxEngine::validate_context(&context) {
         return handle_validation_error(e, &mut recorder).await;
@@ -333,6 +423,7 @@ async fn chat_completions_handler(
         &mut recorder,
         &payload,
         intent,
+        tid,
     )
     .await
 }
@@ -357,6 +448,7 @@ async fn handle_turn_processing(
     recorder: &mut crate::debug_utils::FlightRecorder,
     payload: &serde_json::Value,
     intent: Option<crate::tui::Intent>,
+    tid: String,
 ) -> Response {
     let start_time = std::time::Instant::now();
     let cid = context.conversation_id.clone();
@@ -378,6 +470,7 @@ async fn handle_turn_processing(
         start_time,
         recorder,
         intent,
+        tid,
     )
     .instrument(span)
     .await;
@@ -471,6 +564,7 @@ async fn process_turn(
     start_time: std::time::Instant,
     recorder: &mut crate::debug_utils::FlightRecorder,
     intent: Option<crate::tui::Intent>,
+    tid: String,
 ) -> Response {
     tracing::info!(
         "[🖱️  -> ⚙️ ] Received Turn [History: {}]",
@@ -500,7 +594,31 @@ async fn process_turn(
         &outgoing_request_json,
     );
 
-    recorder.record_stage("upstream_request", outgoing_request_json);
+    recorder.record_stage("upstream_request", outgoing_request_json.clone());
+
+    // Phase 2: Write projected request
+    let bundle_manager = crate::debug_bundle::BundleManager::new("debug_capture");
+    if let Ok(blob_ref) = bundle_manager
+        .write_blob(
+            &context.conversation_id,
+            &tid,
+            "projected",
+            outgoing_request_json.to_string().as_bytes(),
+        )
+        .await
+    {
+        let _ = bundle_manager
+            .add_stage(
+                &context.conversation_id,
+                &tid,
+                "projected",
+                blob_ref,
+                serde_json::json!({
+                    "len": outgoing_request_json.to_string().len(),
+                }),
+            )
+            .await;
+    }
 
     let result = execute_upstream_request(&state, &outgoing_request).await;
 
@@ -545,10 +663,12 @@ async fn process_turn(
                     start_time,
                     recorder,
                     tools_were_advertised,
+                    tid,
                 )
                 .await
             } else {
-                handle_non_streaming_response(response, recorder).await
+                handle_non_streaming_response(response, recorder, &context.conversation_id, &tid)
+                    .await
             }
         }
         Err(e) => {
@@ -633,6 +753,8 @@ async fn execute_upstream_request(
 async fn handle_non_streaming_response(
     response: reqwest::Response,
     recorder: &mut crate::debug_utils::FlightRecorder,
+    cid: &str,
+    tid: &str,
 ) -> Response {
     let status = response.status();
     let mut body = match response.json::<serde_json::Value>().await {
@@ -641,6 +763,27 @@ async fn handle_non_streaming_response(
     };
 
     recorder.record_stage("upstream_response", body.clone());
+
+    // Phase 2: Write upstream response
+    let bundle_manager = crate::debug_bundle::BundleManager::new("debug_capture");
+    if let Ok(blob_ref) = bundle_manager
+        .write_blob(cid, tid, "upstream_response", body.to_string().as_bytes())
+        .await
+    {
+        let _ = bundle_manager
+            .add_stage(
+                cid,
+                tid,
+                "upstream_response",
+                blob_ref,
+                serde_json::json!({
+                    "len": body.to_string().len(),
+                    "status": status.as_u16(),
+                }),
+            )
+            .await;
+    }
+
     crate::logging::sanitize_response_body(&mut body);
     recorder.record_stage("sanitized_response", body.clone());
     crate::logging::log_response_summary(&body);
@@ -668,6 +811,7 @@ async fn handle_upstream_response(
     start_time: std::time::Instant,
     recorder: &mut crate::debug_utils::FlightRecorder,
     tools_were_advertised: bool,
+    tid: String,
 ) -> Response {
     let status = response.status();
     tracing::info!("[☁️  -> ⚙️ ] Status: {}", status);
@@ -695,7 +839,7 @@ async fn handle_upstream_response(
 
     let (tx, rx) = mpsc::channel(100);
     let db = state.db.clone();
-    let conversation_id = context.conversation_id.clone();
+    let _conversation_id = context.conversation_id.clone();
     let tx_tui = state.tx_tui.clone();
     let pricing = state.pricing.clone();
     let disable_rescue = state.disable_rescue;
@@ -720,7 +864,7 @@ async fn handle_upstream_response(
         StreamHandler::handle_stream(
             lines_stream,
             db,
-            conversation_id,
+            cid_clone,
             request_id,
             tx,
             model_id,
@@ -730,6 +874,7 @@ async fn handle_upstream_response(
             disable_rescue,
             tools_were_advertised,
             state_clone,
+            tid,
         )
         .instrument(stream_span)
         .await;
@@ -742,6 +887,61 @@ async fn handle_upstream_response(
                 .text(": keepalive"),
         )
         .into_response()
+}
+
+/// Build the debug UI on startup
+#[allow(clippy::cognitive_complexity)]
+fn build_debug_ui() {
+    use std::process::Command;
+
+    tracing::info!("Building debug UI...");
+
+    // Check if debug_ui directory exists
+    if !std::path::Path::new("debug_ui").exists() {
+        tracing::warn!("debug_ui directory not found, skipping UI build");
+        return;
+    }
+
+    // Check if node_modules exists, if not run npm install
+    if !std::path::Path::new("debug_ui/node_modules").exists() {
+        tracing::info!("Installing UI dependencies...");
+        let install_result = Command::new("npm")
+            .args(["install"])
+            .current_dir("debug_ui")
+            .status();
+
+        match install_result {
+            Ok(status) if status.success() => {
+                tracing::info!("UI dependencies installed successfully");
+            }
+            Ok(status) => {
+                tracing::warn!("npm install failed with status: {}", status);
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to run npm install: {}", e);
+                return;
+            }
+        }
+    }
+
+    // Build the UI
+    let build_result = Command::new("npm")
+        .args(["run", "build"])
+        .current_dir("debug_ui")
+        .status();
+
+    match build_result {
+        Ok(status) if status.success() => {
+            tracing::info!("Debug UI built successfully");
+        }
+        Ok(status) => {
+            tracing::warn!("UI build failed with status: {}", status);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to run UI build: {}", e);
+        }
+    }
 }
 
 #[tokio::main]
@@ -796,6 +996,10 @@ async fn main() {
         log_rotation_manager.check_and_rotate(std::path::Path::new("logs"), "trace_buffer.json");
 
     let args = Arc::new(Args::parse());
+
+    // Build debug UI on startup
+    build_debug_ui();
+
     let db = match init_db(&args.database).await {
         Ok(pool) => pool,
         Err(e) => {
@@ -864,6 +1068,36 @@ async fn main() {
             "/admin/conversation/:cid",
             axum::routing::get(health::admin_conversation),
         )
+        // Debug API
+        .route(
+            "/debug/conversations",
+            axum::routing::get(list_conversations),
+        )
+        .route(
+            "/debug/conversation/:cid",
+            axum::routing::get(get_conversation),
+        )
+        .route(
+            "/debug/conversation/:cid/turn/:tid",
+            axum::routing::get(get_turn),
+        )
+        .route("/debug/blob/:cid/:tid/:bid", axum::routing::get(get_blob))
+        .route(
+            "/debug/diff/:cid/:tid",
+            axum::routing::post(compute_stage_diff),
+        )
+        .route(
+            "/debug/export/conversation/:cid",
+            axum::routing::get(export_conversation),
+        )
+        .route(
+            "/debug/export/turn/:cid/:tid",
+            axum::routing::get(export_turn),
+        )
+        .route("/debug/replay/:cid/:tid", axum::routing::post(replay_turn))
+        // Serve static UI with SPA fallback
+        .route("/debug/ui", axum::routing::get(debug_ui_root))
+        .route("/debug/ui/*path", axum::routing::get(debug_ui_handler))
         .layer(axum::extract::DefaultBodyLimit::max(args.max_body_size))
         .layer(middleware::from_fn(turn_id_middleware))
         .with_state(state.clone());
@@ -911,5 +1145,428 @@ async fn main() {
 
     if let Err(e) = app_tui.run().await {
         eprintln!("TUI Error: {}", e);
+    }
+}
+
+// --- DEBUG API HANDLERS ---
+
+async fn list_conversations() -> impl IntoResponse {
+    let mut conversations = Vec::new();
+    let mut read_dir = match tokio::fs::read_dir("debug_capture/conversations").await {
+        Ok(rd) => rd,
+        Err(_) => return Json(conversations).into_response(),
+    };
+
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+            let _cid = entry.file_name().to_string_lossy().to_string();
+            let summary_path = entry.path().join("conversation.json");
+            if let Ok(content) = tokio::fs::read_to_string(summary_path).await {
+                if let Ok(summary) =
+                    serde_json::from_str::<crate::debug_bundle::ConversationSummary>(&content)
+                {
+                    conversations.push(summary);
+                }
+            }
+        }
+    }
+
+    conversations.sort_by_key(|c| std::cmp::Reverse(c.last_updated_ms));
+    Json(conversations).into_response()
+}
+
+async fn get_conversation(
+    axum::extract::Path(cid): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let path = format!("debug_capture/conversations/{}/conversation.json", cid);
+    match tokio::fs::read_to_string(path).await {
+        Ok(content) => (ax_http::StatusCode::OK, content).into_response(),
+        Err(_) => (ax_http::StatusCode::NOT_FOUND, "Conversation not found").into_response(),
+    }
+}
+
+async fn get_turn(
+    axum::extract::Path((cid, tid)): axum::extract::Path<(String, String)>,
+) -> impl IntoResponse {
+    let path = format!(
+        "debug_capture/conversations/{}/turns/{}/turn.json",
+        cid, tid
+    );
+    match tokio::fs::read_to_string(path).await {
+        Ok(content) => (ax_http::StatusCode::OK, content).into_response(),
+        Err(_) => (ax_http::StatusCode::NOT_FOUND, "Turn not found").into_response(),
+    }
+}
+
+async fn get_blob(
+    axum::extract::Path((cid, tid, bid)): axum::extract::Path<(String, String, String)>,
+) -> impl IntoResponse {
+    let blobs_dir = format!("debug_capture/conversations/{}/turns/{}/blobs", cid, tid);
+
+    // Try to find the blob with any extension (.json, .txt, .bin)
+    let extensions = vec![".json", ".txt", ".bin"];
+    for ext in extensions {
+        let path = format!("{}/{}{}", blobs_dir, bid, ext);
+        if let Ok(bytes) = tokio::fs::read(&path).await {
+            let content_type = match ext {
+                ".json" => "application/json",
+                ".txt" => "text/plain; charset=utf-8",
+                ".bin" => "application/octet-stream",
+                _ => "application/octet-stream",
+            };
+            return (
+                ax_http::StatusCode::OK,
+                [(ax_http::header::CONTENT_TYPE, content_type)],
+                bytes,
+            )
+                .into_response();
+        }
+    }
+
+    (ax_http::StatusCode::NOT_FOUND, "Blob not found").into_response()
+}
+
+async fn compute_stage_diff(
+    axum::extract::Path((cid, tid)): axum::extract::Path<(String, String)>,
+    axum::extract::Json(payload): axum::extract::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let stage1 = payload.get("stage1").and_then(|s| s.as_str());
+    let stage2 = payload.get("stage2").and_then(|s| s.as_str());
+
+    if stage1.is_none() || stage2.is_none() {
+        return (
+            ax_http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "error": "Missing stage1 or stage2" })),
+        )
+            .into_response();
+    }
+
+    // Read both stage blobs
+    let blob1_path = format!(
+        "debug_capture/conversations/{}/turns/{}/blobs/{}.json",
+        cid,
+        tid,
+        stage1.unwrap()
+    );
+    let blob2_path = format!(
+        "debug_capture/conversations/{}/turns/{}/blobs/{}.json",
+        cid,
+        tid,
+        stage2.unwrap()
+    );
+
+    let blob1_content = match tokio::fs::read_to_string(&blob1_path).await {
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(val) => val,
+            Err(_) => {
+                return (
+                    ax_http::StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({ "error": "Failed to parse stage1 JSON" })),
+                )
+                    .into_response();
+            }
+        },
+        Err(_) => {
+            return (
+                ax_http::StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({ "error": "stage1 blob not found" })),
+            )
+                .into_response();
+        }
+    };
+
+    let blob2_content = match tokio::fs::read_to_string(&blob2_path).await {
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(val) => val,
+            Err(_) => {
+                return (
+                    ax_http::StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({ "error": "Failed to parse stage2 JSON" })),
+                )
+                    .into_response();
+            }
+        },
+        Err(_) => {
+            return (
+                ax_http::StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({ "error": "stage2 blob not found" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Compute diff
+    let diff =
+        crate::debug_bundle::BundleManager::compute_json_diff(&blob1_content, &blob2_content);
+
+    (
+        ax_http::StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "stage1": stage1,
+            "stage2": stage2,
+            "diff": diff,
+        })),
+    )
+        .into_response()
+}
+
+async fn export_conversation(
+    axum::extract::Path(cid): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    use std::io::Write;
+
+    // Read conversation summary
+    let conv_path = format!("debug_capture/conversations/{}/conversation.json", cid);
+    let conv_content = match tokio::fs::read_to_string(&conv_path).await {
+        Ok(content) => content,
+        Err(_) => {
+            return (ax_http::StatusCode::NOT_FOUND, "Conversation not found").into_response();
+        }
+    };
+
+    // Create a zip file in memory
+    let mut zip_buffer = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_buffer));
+        let options = zip::write::FileOptions::default();
+
+        // Add conversation.json
+        let _ = zip.start_file("conversation.json", options);
+        let _ = zip.write_all(conv_content.as_bytes());
+
+        // Add all turn directories
+        let turns_dir = format!("debug_capture/conversations/{}/turns", cid);
+        if let Ok(mut entries) = tokio::fs::read_dir(&turns_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(tid) = path.file_name().and_then(|n| n.to_str()) {
+                        // Add turn.json
+                        let turn_path = format!("{}/{}/turn.json", turns_dir, tid);
+                        if let Ok(turn_content) = tokio::fs::read_to_string(&turn_path).await {
+                            let _ = zip.start_file(format!("turns/{}/turn.json", tid), options);
+                            let _ = zip.write_all(turn_content.as_bytes());
+                        }
+
+                        // Add blobs
+                        let blobs_dir = format!("{}/{}/blobs", turns_dir, tid);
+                        if let Ok(mut blob_entries) = tokio::fs::read_dir(&blobs_dir).await {
+                            while let Ok(Some(blob_entry)) = blob_entries.next_entry().await {
+                                let blob_path = blob_entry.path();
+                                if blob_path.is_file() {
+                                    if let Some(blob_name) =
+                                        blob_path.file_name().and_then(|n| n.to_str())
+                                    {
+                                        if let Ok(blob_content) = tokio::fs::read(&blob_path).await
+                                        {
+                                            let _ = zip.start_file(
+                                                format!("turns/{}/blobs/{}", tid, blob_name),
+                                                options,
+                                            );
+                                            let _ = zip.write_all(&blob_content);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let _ = zip.finish();
+    }
+
+    (
+        ax_http::StatusCode::OK,
+        [
+            (ax_http::header::CONTENT_TYPE, "application/zip"),
+            (
+                ax_http::header::CONTENT_DISPOSITION,
+                &format!("attachment; filename=\"conversation-{}.zip\"", cid),
+            ),
+        ],
+        zip_buffer,
+    )
+        .into_response()
+}
+
+async fn export_turn(
+    axum::extract::Path((cid, tid)): axum::extract::Path<(String, String)>,
+) -> impl IntoResponse {
+    use std::io::Write;
+
+    // Read turn.json
+    let turn_path = format!(
+        "debug_capture/conversations/{}/turns/{}/turn.json",
+        cid, tid
+    );
+    let turn_content = match tokio::fs::read_to_string(&turn_path).await {
+        Ok(content) => content,
+        Err(_) => {
+            return (ax_http::StatusCode::NOT_FOUND, "Turn not found").into_response();
+        }
+    };
+
+    // Create a zip file in memory
+    let mut zip_buffer = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_buffer));
+        let options = zip::write::FileOptions::default();
+
+        // Add turn.json
+        let _ = zip.start_file("turn.json", options);
+        let _ = zip.write_all(turn_content.as_bytes());
+
+        // Add blobs
+        let blobs_dir = format!("debug_capture/conversations/{}/turns/{}/blobs", cid, tid);
+        if let Ok(mut blob_entries) = tokio::fs::read_dir(&blobs_dir).await {
+            while let Ok(Some(blob_entry)) = blob_entries.next_entry().await {
+                let blob_path = blob_entry.path();
+                if blob_path.is_file() {
+                    if let Some(blob_name) = blob_path.file_name().and_then(|n| n.to_str()) {
+                        if let Ok(blob_content) = tokio::fs::read(&blob_path).await {
+                            let _ = zip.start_file(format!("blobs/{}", blob_name), options);
+                            let _ = zip.write_all(&blob_content);
+                        }
+                    }
+                }
+            }
+        }
+
+        let _ = zip.finish();
+    }
+
+    (
+        ax_http::StatusCode::OK,
+        [
+            (ax_http::header::CONTENT_TYPE, "application/zip"),
+            (
+                ax_http::header::CONTENT_DISPOSITION,
+                &format!("attachment; filename=\"turn-{}.zip\"", tid),
+            ),
+        ],
+        zip_buffer,
+    )
+        .into_response()
+}
+
+async fn replay_turn(
+    axum::extract::Path((cid, tid)): axum::extract::Path<(String, String)>,
+    axum::extract::Json(payload): axum::extract::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    // Read the ingress_raw blob to get the original payload
+    let ingress_path = format!(
+        "debug_capture/conversations/{}/turns/{}/blobs/ingress_raw.json",
+        cid, tid
+    );
+    let ingress_content = match tokio::fs::read_to_string(&ingress_path).await {
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(val) => val,
+            Err(_) => {
+                return (
+                    ax_http::StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({ "error": "Failed to parse ingress_raw JSON" })),
+                )
+                    .into_response();
+            }
+        },
+        Err(_) => {
+            return (
+                ax_http::StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({ "error": "ingress_raw blob not found" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Extract options from payload
+    let stages_to_run = payload
+        .get("stages")
+        .and_then(|s| s.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+        .unwrap_or_else(|| vec!["projected", "final"]);
+
+    // For now, return a simple response indicating replay capability
+    // Full replay would require re-running the engine with the stored payload
+    (
+        ax_http::StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "status": "replay_capability_available",
+            "message": "Replay endpoint is available for future implementation",
+            "ingress_payload_size": ingress_content.to_string().len(),
+            "requested_stages": stages_to_run,
+            "note": "Full replay requires re-running the engine with stored payload and current code"
+        })),
+    )
+        .into_response()
+}
+
+#[allow(clippy::cognitive_complexity)]
+async fn debug_ui_handler(
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    // Strip leading slash if present and construct path
+    let clean_path = path.trim_start_matches('/');
+    let file_path = format!("debug_ui/dist/{}", clean_path);
+
+    tracing::debug!("Serving UI asset: {} (from path: {})", file_path, path);
+
+    match tokio::fs::read(&file_path).await {
+        Ok(content) => {
+            let content_type = if file_path.ends_with(".js") {
+                "application/javascript; charset=utf-8"
+            } else if file_path.ends_with(".css") {
+                "text/css; charset=utf-8"
+            } else if file_path.ends_with(".json") {
+                "application/json"
+            } else if file_path.ends_with(".svg") {
+                "image/svg+xml"
+            } else if file_path.ends_with(".html") {
+                "text/html; charset=utf-8"
+            } else {
+                "application/octet-stream"
+            };
+
+            ([(ax_http::header::CONTENT_TYPE, content_type)], content).into_response()
+        }
+        Err(e) => {
+            tracing::warn!("Failed to serve asset {}: {}", file_path, e);
+            // Fallback to index.html for SPA routing
+            match tokio::fs::read("debug_ui/dist/index.html").await {
+                Ok(content) => (
+                    [(ax_http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    content,
+                )
+                    .into_response(),
+                Err(e) => {
+                    tracing::error!("Failed to read index.html: {}", e);
+                    (
+                        ax_http::StatusCode::NOT_FOUND,
+                        "Debug UI not found. Run: cd debug_ui && npm run build",
+                    )
+                        .into_response()
+                }
+            }
+        }
+    }
+}
+
+async fn debug_ui_root() -> impl IntoResponse {
+    // Serve index.html at /debug/ui root
+    match tokio::fs::read("debug_ui/dist/index.html").await {
+        Ok(content) => (
+            [(ax_http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            content,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to read index.html: {}", e);
+            (
+                ax_http::StatusCode::NOT_FOUND,
+                "Debug UI not found. Run: cd debug_ui && npm run build",
+            )
+                .into_response()
+        }
     }
 }
