@@ -40,9 +40,12 @@ fn tool_call_arguments_are_preserved_when_id_missing_on_followup_chunk() {
         .content
         .iter()
         .filter_map(|p| match p {
-            parallax::types::MessagePart::ToolCall { id, name, arguments, .. } => {
-                Some((id.clone(), name.clone(), arguments.clone()))
-            }
+            parallax::types::MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+                ..
+            } => Some((id.clone(), name.clone(), arguments.clone())),
             _ => None,
         })
         .collect::<Vec<_>>();

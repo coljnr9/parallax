@@ -1,3 +1,5 @@
+use crate::redaction::{redact_value, RedactionLevel};
+use crate::AppState;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -5,8 +7,6 @@ use axum::{
 };
 use serde::Serialize;
 use std::sync::Arc;
-use crate::AppState;
-use crate::redaction::{redact_value, RedactionLevel};
 
 #[derive(Serialize)]
 pub struct LivenessResponse {
@@ -24,7 +24,9 @@ pub async fn liveness() -> Json<LivenessResponse> {
     Json(LivenessResponse { status: "ok" })
 }
 
-pub async fn readiness(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ReadinessResponse>) {
+pub async fn readiness(
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<ReadinessResponse>) {
     let mut db_ok = true;
     let mut pricing_ok = true;
 
@@ -49,7 +51,12 @@ pub async fn readiness(State(state): State<Arc<AppState>>) -> (StatusCode, Json<
     (
         status_code,
         Json(ReadinessResponse {
-            status: if db_ok && pricing_ok { "ready" } else { "unready" }.to_string(),
+            status: if db_ok && pricing_ok {
+                "ready"
+            } else {
+                "unready"
+            }
+            .to_string(),
             database: if db_ok { "ok" } else { "error" }.to_string(),
             pricing: if pricing_ok { "ok" } else { "empty" }.to_string(),
         }),
@@ -65,7 +72,10 @@ pub async fn admin_conversation(
     let ip = addr.ip();
     if !ip.is_loopback() {
         tracing::warn!("Blocked admin access attempt from {}", ip);
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "Unauthorized" })));
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "Unauthorized" })),
+        );
     }
 
     // 2. Query DB for conversation history
@@ -80,7 +90,10 @@ pub async fn admin_conversation(
     };
 
     if messages.is_empty() {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Conversation not found" })));
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Conversation not found" })),
+        );
     }
 
     // 3. Prepare response and redact
@@ -95,5 +108,3 @@ pub async fn admin_conversation(
 
     (StatusCode::OK, Json(response))
 }
-
-

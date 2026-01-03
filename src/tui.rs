@@ -1,7 +1,6 @@
 #![allow(clippy::manual_unwrap_or, clippy::manual_unwrap_or_default)]
 use crate::str_utils;
 use crate::types::*;
-use ratatui::layout::Position;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -418,12 +417,13 @@ impl AppState {
     }
 
     fn focus_selected(&mut self) {
-        if self.active_tab == ActiveTab::FlightDeck
-            && let Some(i) = self.list_state.selected()
-            && let Some(req) = self.requests.get(i)
-        {
-            self.active_request_id = Some(req.id.clone());
-            self.active_tab = ActiveTab::StreamFocus;
+        if self.active_tab == ActiveTab::FlightDeck {
+            if let Some(i) = self.list_state.selected() {
+                if let Some(req) = self.requests.get(i) {
+                    self.active_request_id = Some(req.id.clone());
+                    self.active_tab = ActiveTab::StreamFocus;
+                }
+            }
         }
     }
 
@@ -435,9 +435,10 @@ impl AppState {
                 && req.usage.is_some()
                 && req.actual_cost.is_some()
                 && req.latency.is_some()
-                && let (Some(usage), Some(latency), Some(cost)) =
-                    (&req.usage, req.latency, req.actual_cost)
             {
+                if let (Some(usage), Some(latency), Some(cost)) =
+                    (&req.usage, req.latency, req.actual_cost)
+                {
                     self.graph_state.record_request_completion(
                         &req.model,
                         usage.completion_tokens,
@@ -445,6 +446,7 @@ impl AppState {
                         cost,
                     );
                     req.recorded_in_graphs = true;
+                }
             }
         }
     }
@@ -535,8 +537,8 @@ impl App {
     fn render(&mut self, f: &mut Frame) {
         self.state.matrix_effect.render(f);
 
-        if f.area().width < 75 {
-            self.render_size_warning(f, f.area());
+        if f.size().width < 75 {
+            self.render_size_warning(f, f.size());
             return;
         }
 
@@ -547,7 +549,7 @@ impl App {
                 Constraint::Min(0),    // Main Content
                 Constraint::Length(3), // Footer
             ])
-            .split(f.area());
+            .split(f.size());
 
         self.render_header(f, chunks[0]);
 
@@ -722,15 +724,15 @@ impl App {
             if now.duration_since(req.timestamp).as_secs() > 300 {
                 continue;
             }
-            if let (Some(usage), Some(latency)) = (&req.usage, req.latency)
-                && latency.0 > 0
-            {
-                let entry = model_stats.entry(req.model.clone()).or_default();
-                entry.0 += usage.completion_tokens as u64;
-                entry.1 += latency.0;
+            if let (Some(usage), Some(latency)) = (&req.usage, req.latency) {
+                if latency.0 > 0 {
+                    let entry = model_stats.entry(req.model.clone()).or_default();
+                    entry.0 += usage.completion_tokens as u64;
+                    entry.1 += latency.0;
 
-                total_tokens += usage.completion_tokens as u64;
-                total_time += latency.0;
+                    total_tokens += usage.completion_tokens as u64;
+                    total_time += latency.0;
+                }
             }
         }
 
@@ -1327,12 +1329,11 @@ impl App {
             let color = self.state.graph_state.get_model_color(model);
             let model_data = &self.state.graph_state.models[model];
 
-            let current_tps = match model_data
+            let current_tps = model_data
                 .buckets
-                .back() {
-                    Some(b) => b.tps_completion,
-                    None => 0.0,
-                };
+                .back()
+                .map(|b| b.tps_completion)
+                .unwrap_or(0.0);
 
             let row = if area.width > 60 {
                 Row::new(vec![
@@ -1376,7 +1377,7 @@ impl App {
                     Style::default().add_modifier(Modifier::BOLD),
                 )),
                 Cell::from(Span::styled(
-                    format!("${}", total_cost),
+                    format!("${:.4}", total_cost),
                     Style::default().add_modifier(Modifier::BOLD),
                 )),
             ])
@@ -1417,12 +1418,11 @@ impl App {
             area,
             " COMPLETION TPS ",
             |model_data| {
-                match model_data
+                model_data
                     .buckets
-                    .back() {
-                        Some(b) => b.tps_completion,
-                        None => 0.0,
-                    }
+                    .back()
+                    .map(|b| b.tps_completion)
+                    .unwrap_or(0.0)
             },
             true, // show current value
         );
@@ -1529,7 +1529,7 @@ impl App {
                 let x_pos = inner.x + 1 + x_offset as u16;
 
                 if y_pos > inner.y && y_pos < inner.y + inner.height - 1 {
-                    let cell = &mut f.buffer_mut()[Position::new(x_pos, y_pos)];
+                    let cell = f.buffer_mut().get_mut(x_pos, y_pos);
                     {
                         cell.set_char('█').set_style(Style::default().fg(*color));
                     }
@@ -1808,7 +1808,7 @@ impl MatrixEffect {
             return;
         }
 
-        let area = f.area();
+        let area = f.size();
         if area.width != self.width {
             self.resize(area.width);
         }
@@ -1836,7 +1836,7 @@ impl MatrixEffect {
                     };
 
                     if x < area.width {
-                        let cell = &mut f.buffer_mut()[Position::new(x, y)];
+                        let cell = f.buffer_mut().get_mut(x, y);
                         {
                             cell.set_char(c).set_style(style);
                         }
@@ -1912,7 +1912,7 @@ mod graph_tests {
         let mut graph_state = GraphState::new();
 
         // Record a request
-        graph_state.record_request_completion("gpt-4", 100, 2000, 0.01);
+        graph_state.record_request_completion("gpt-4", 100, LatencyMs(2000), CostUsd(0.01));
 
         assert_eq!(graph_state.models.len(), 1);
         assert!(graph_state.model_colors.contains_key("gpt-4"));
@@ -1937,7 +1937,7 @@ mod graph_tests {
         let mut graph_state = GraphState::new();
 
         // Test TPS calculation: 100 tokens in 2 seconds = 50 TPS
-        graph_state.record_request_completion("gpt-4", 100, 2000, 0.01);
+        graph_state.record_request_completion("gpt-4", 100, LatencyMs(2000), CostUsd(0.01));
 
         let model_data = &graph_state.models["gpt-4"];
         let bucket = match model_data.buckets.back() {
@@ -1952,8 +1952,8 @@ mod graph_tests {
         let mut graph_state = GraphState::new();
 
         // Record requests for different models
-        graph_state.record_request_completion("gpt-4", 100, 2000, 0.01);
-        graph_state.record_request_completion("claude-3", 150, 3000, 0.015);
+        graph_state.record_request_completion("gpt-4", 100, LatencyMs(2000), CostUsd(0.01));
+        graph_state.record_request_completion("claude-3", 150, LatencyMs(3000), CostUsd(0.015));
 
         assert_eq!(graph_state.models.len(), 2);
         assert!(graph_state.models.contains_key("gpt-4"));
@@ -1969,11 +1969,11 @@ mod graph_tests {
         let mut graph_state = GraphState::new();
 
         // First model should get first color
-        graph_state.record_request_completion("model1", 100, 2000, 0.01);
+        graph_state.record_request_completion("model1", 100, LatencyMs(2000), CostUsd(0.01));
         let color1 = graph_state.get_model_color("model1");
 
         // Second model should get second color
-        graph_state.record_request_completion("model2", 100, 2000, 0.01);
+        graph_state.record_request_completion("model2", 100, LatencyMs(2000), CostUsd(0.01));
         let color2 = graph_state.get_model_color("model2");
 
         assert_ne!(color1, color2);
@@ -1988,7 +1988,7 @@ mod graph_tests {
         let mut graph_state = GraphState::new();
 
         // Add initial data
-        graph_state.record_request_completion("gpt-4", 100, 2000, 0.01);
+        graph_state.record_request_completion("gpt-4", 100, LatencyMs(2000), CostUsd(0.01));
         let initial_bucket_count = graph_state.models["gpt-4"].buckets.len();
 
         // Advance time by 1 second
@@ -2007,7 +2007,7 @@ mod graph_tests {
 
         // Add more buckets than window size
         for i in 0..5 {
-            graph_state.record_request_completion(&format!("model{}", i % 2), 100, 2000, 0.01);
+            graph_state.record_request_completion(&format!("model{}", i % 2), 100, LatencyMs(2000), CostUsd(0.01));
             std::thread::sleep(std::time::Duration::from_millis(1100));
         }
 

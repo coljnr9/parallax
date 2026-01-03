@@ -2,11 +2,11 @@ use serde_json::{Map, Value};
 
 use crate::types::{ParallaxError, Result};
 use std::future::Future;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
+use tokio::sync::RwLock;
 
 pub struct RetryPolicy {
     pub max_attempts: u32,
@@ -42,8 +42,13 @@ impl RetryPolicy {
                     };
                     let final_delay_ms = (base_delay as i64 + jitter).max(1) as u64;
                     let delay = Duration::from_millis(final_delay_ms);
-                    
-                    tracing::warn!("Request failed (attempt {}): {}. Retrying in {:?} (jittered)...", attempts, e, delay);
+
+                    tracing::warn!(
+                        "Request failed (attempt {}): {}. Retrying in {:?} (jittered)...",
+                        attempts,
+                        e,
+                        delay
+                    );
                     tokio::time::sleep(delay).await;
                 }
                 Err(e) => return Err(e),
@@ -53,7 +58,9 @@ impl RetryPolicy {
 
     fn is_retryable(&self, err: &crate::types::ObservedError) -> bool {
         match &err.inner {
-            ParallaxError::Network(_) | ParallaxError::Io(_) | ParallaxError::Internal(_, _) => true,
+            ParallaxError::Network(_) | ParallaxError::Io(_) | ParallaxError::Internal(_, _) => {
+                true
+            }
             ParallaxError::Upstream(status, _) => {
                 status.is_server_error() || *status == axum::http::StatusCode::TOO_MANY_REQUESTS
             }
@@ -90,30 +97,35 @@ impl CircuitBreaker {
 
     pub async fn check(&self) -> Result<()> {
         let mut state = self.state.write().await;
-        
+
         if *state == CircuitState::Open {
             let last_failure = match self.last_failure_time.try_read() {
                 Ok(last) => last,
                 Err(_) => {
-                    tracing::warn!("Could not read last failure time for circuit breaker, assuming still OPEN");
+                    tracing::warn!(
+                        "Could not read last failure time for circuit breaker, assuming still OPEN"
+                    );
                     return Err(ParallaxError::Upstream(
                         axum::http::StatusCode::SERVICE_UNAVAILABLE,
                         "Circuit breaker is OPEN (failure time locked)".to_string(),
-                    ).into());
+                    )
+                    .into());
                 }
             };
 
-            if let Some(last) = *last_failure
-                && last.elapsed() > self.recovery_timeout {
+            if let Some(last) = *last_failure {
+                if last.elapsed() > self.recovery_timeout {
                     tracing::info!("Circuit breaker transitioning to Half-Open");
                     *state = CircuitState::HalfOpen;
                     return Ok(());
+                }
             }
 
             return Err(ParallaxError::Upstream(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 "Circuit breaker is OPEN".to_string(),
-            ).into());
+            )
+            .into());
         }
         Ok(())
     }
@@ -133,7 +145,10 @@ impl CircuitBreaker {
         *self.last_failure_time.write().await = Some(Instant::now());
 
         if failures >= self.failure_threshold && *state != CircuitState::Open {
-            tracing::error!("Circuit breaker transitioning to OPEN ({} consecutive failures)", failures);
+            tracing::error!(
+                "Circuit breaker transitioning to OPEN ({} consecutive failures)",
+                failures
+            );
             *state = CircuitState::Open;
         }
     }
@@ -167,7 +182,7 @@ fn sanitize_plan_args(args: &mut Value) {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => "Implementation Plan".to_string(),
         };
-        
+
         // Ensure plan has a proper H1 title if missing
         if let Some(Value::String(plan)) = map.get_mut("plan") {
             let trimmed_plan = plan.trim();
@@ -176,7 +191,7 @@ fn sanitize_plan_args(args: &mut Value) {
                 *plan = format!("# {}\n\n{}", title, plan);
             }
         }
-        
+
         // Clean up any forbidden terms that might cause execution failures
         if let Some(Value::String(plan)) = map.get_mut("plan") {
             // Remove or replace terms that could trigger "Severity 1" violations
@@ -187,7 +202,7 @@ fn sanitize_plan_args(args: &mut Value) {
                 ("cargo check", "rust check"),
                 ("grep ", "ripgrep "),
             ];
-            
+
             for (forbidden, replacement) in &forbidden_terms {
                 if plan.contains(forbidden) {
                     *plan = plan.replace(forbidden, replacement);
@@ -255,10 +270,12 @@ mod tests {
         assert!(is_diff_like("diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1,1 +1,1 @@\n-old\n+new"));
         assert!(is_diff_like("--- a/file.rs\n+++ b/file.rs"));
         assert!(is_diff_like("@@ -1,5 +1,6 @@"));
-        
+
         // Negative cases
         assert!(!is_diff_like("Just some normal text."));
-        assert!(!is_diff_like("fn main() {\n    println!(\"Hello, world!\");\n}"));
+        assert!(!is_diff_like(
+            "fn main() {\n    println!(\"Hello, world!\");\n}"
+        ));
         assert!(!is_diff_like("The value is --- unknown ---."));
     }
 
@@ -411,7 +428,10 @@ mod tests {
             assert!(!plan.contains("npm install"), "Should not contain 'npm install'");
             assert!(!plan.contains("cargo build"), "Should not contain 'cargo build'");
             // Check that grep was replaced with ripgrep (not just removed)
-            assert!(plan.contains("ripgrep "), "Should contain 'ripgrep ' replacement");
+            assert!(
+                plan.contains("ripgrep "),
+                "Should contain 'ripgrep ' replacement"
+            );
             assert!(plan.contains("package manager install"));
             assert!(plan.contains("rust build"));
             // Verify the original problematic terms are gone

@@ -1,14 +1,14 @@
+use lazy_static::lazy_static;
+use regex::Regex;
+use std::io::Write;
 use tracing::Subscriber;
 use tracing_subscriber::layer::Layer;
 use tracing_subscriber::registry::LookupSpan;
-use std::io::Write;
-use regex::Regex;
-use lazy_static::lazy_static;
 
 lazy_static! {
-    static ref REDACTION_REGEX: Regex = Regex::new(
-        r"(?i)(sk-[A-Za-z0-9]{20,}|Bearer\s+[^\s]+|x-api-key:\s*[^\s]+)"
-    ).expect("Invalid redaction regex");
+    static ref REDACTION_REGEX: Regex =
+        Regex::new(r"(?i)(sk-[A-Za-z0-9]{20,}|Bearer\s+[^\s]+|x-api-key:\s*[^\s]+)")
+            .expect("Invalid redaction regex");
 }
 
 pub struct RedactingWriter<W: Write> {
@@ -43,4 +43,3 @@ where
     // This layer is primarily a marker or for future structured redaction.
     // The actual redaction happens in RedactingWriter for raw text outputs.
 }
-

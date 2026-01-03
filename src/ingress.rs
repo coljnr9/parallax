@@ -246,11 +246,12 @@ impl RawTurn {
             };
 
             if content.contains("<user_query>") {
-                if let Some(start) = content.find("<user_query>")
-                    && let Some(end) = content.find("</user_query>")
-                    && let Some(slice) = str_utils::slice_bytes_safe(content, start + 12, end)
-                {
-                    return slice.to_string();
+                if let Some(start) = content.find("<user_query>") {
+                    if let Some(end) = content.find("</user_query>") {
+                        if let Some(slice) = str_utils::slice_bytes_safe(content, start + 12, end) {
+                            return slice.to_string();
+                        }
+                    }
                 }
                 return content.to_string();
             }

@@ -1,8 +1,8 @@
+use serde_json::{json, Value};
+use std::io::Write;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
-use serde_json::{json, Value};
-use std::io::Write;
 
 pub struct AgentNdjsonLayer<W: Write + Send + Sync + 'static> {
     writer: std::sync::Mutex<W>,
@@ -25,7 +25,7 @@ where
         let timestamp = chrono::Utc::now().to_rfc3339();
         let level = event.metadata().level().to_string();
         let target = event.metadata().target().to_string();
-        
+
         let mut fields = json!({});
         let mut visitor = JsonVisitor(&mut fields);
         event.record(&mut visitor);
@@ -41,7 +41,11 @@ where
             }
         }
 
-        let trace_id = span_list.first().and_then(|s| s.get("id")).map(|id| id.to_string()).unwrap_or_else(|| "none".to_string());
+        let trace_id = span_list
+            .first()
+            .and_then(|s| s.get("id"))
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "none".to_string());
 
         let output = json!({
             "timestamp": timestamp,
@@ -81,4 +85,3 @@ impl<'a> tracing::field::Visit for JsonVisitor<'a> {
         self.0[field.name()] = json!(value);
     }
 }
-

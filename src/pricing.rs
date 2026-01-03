@@ -15,8 +15,8 @@ pub async fn fetch_pricing(
             .await
         {
             Ok(resp) => {
-                if let Ok(json) = resp.json::<serde_json::Value>().await
-                    && let Some(models) = json.get("data").and_then(|d| d.as_array()) {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(models) = json.get("data").and_then(|d| d.as_array()) {
                         for m in models {
                             if let (Some(id), Some(p)) =
                                 (m.get("id").and_then(|v| v.as_str()), m.get("pricing"))
@@ -52,6 +52,7 @@ pub async fn fetch_pricing(
                         }
                     }
                 }
+            }
             Err(e) => {
                 if attempts >= max_attempts {
                     tracing::error!(

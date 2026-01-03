@@ -1,5 +1,5 @@
 //! Metrics and Observability Module
-//! 
+//!
 //! Tracks aggregated metrics for tool arguments, JSON parsing, and provider-specific issues
 //! to reduce log noise while maintaining observability.
 
@@ -154,4 +154,3 @@ mod tests {
         assert_eq!(all.len(), 2);
     }
 }
-

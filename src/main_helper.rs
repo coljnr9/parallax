@@ -1,9 +1,9 @@
-use crate::types::*;
-use std::sync::Arc;
-use tokio::sync::broadcast;
 use crate::db::DbPool;
 use crate::tui::TuiEvent;
+use crate::types::*;
 use clap::Parser;
+use std::sync::Arc;
+use tokio::sync::broadcast;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -58,10 +58,11 @@ pub fn calculate_cost(
     let price = match pricing.get(model_id) {
         Some(p) => p,
         None => {
-            return Err(ParallaxError::Internal(format!(
-                "unknown model name: {}",
-                model_id
-            ), tracing_error::SpanTrace::capture()).into())
+            return Err(ParallaxError::Internal(
+                format!("unknown model name: {}", model_id),
+                tracing_error::SpanTrace::capture(),
+            )
+            .into())
         }
     };
 
@@ -85,7 +86,8 @@ pub fn calculate_cost(
         return Err(ParallaxError::Internal(
             "cost not available (pricing returned 0.0 for tokens)".to_string(),
             tracing_error::SpanTrace::capture(),
-        ).into());
+        )
+        .into());
     }
 
     Ok(CostBreakdown {

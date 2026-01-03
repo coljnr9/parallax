@@ -1,5 +1,5 @@
-use crate::str_utils;
 use crate::redaction::{redact_value, RedactionLevel};
+use crate::str_utils;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -323,11 +323,10 @@ fn summarize_json_inner(value: &Value, indent: usize) -> String {
                 let mut summarized_fields = Vec::new();
                 for (k, v) in map {
                     // Special handling for the "messages" array to show first and last
-                    if k == "messages"
-                        && let Value::Array(arr) = v
-                        && arr.len() > 2
-                    {
-                        let mut items = Vec::new();
+                    if k == "messages" {
+                        if let Value::Array(arr) = v {
+                            if arr.len() > 2 {
+                                let mut items = Vec::new();
                                 items.push(format!(
                                     "{}{}",
                                     next_space,
@@ -351,6 +350,8 @@ fn summarize_json_inner(value: &Value, indent: usize) -> String {
                                     next_space
                                 ));
                                 continue;
+                            }
+                        }
                     }
                     summarized_fields.push(format!(
                         "{}{}: {}",

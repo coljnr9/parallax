@@ -7,22 +7,22 @@ use std::collections::HashMap;
 pub struct OpenAiRequest {
     pub model: String,
     pub messages: Vec<OpenAiMessage>,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<OpenAiTool>>,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<serde_json::Value>,
 
@@ -72,12 +72,14 @@ pub enum OpenAiContent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum OpenAiContentPart {
-    Text { 
+    Text {
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<serde_json::Value>,
     },
-    ImageUrl { image_url: OpenAiImageUrl },
+    ImageUrl {
+        image_url: OpenAiImageUrl,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,7 +92,7 @@ pub struct OpenAiToolCall {
     pub id: String,
     pub r#type: String, // Always "function"
     pub function: OpenAiFunctionCall,
-    
+
     /// OpenRouter aggregator specific: holds reasoning token
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
