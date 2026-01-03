@@ -282,6 +282,28 @@ pub struct ToolCallInfo {
     pub arguments: String,
 }
 
+/// Valid role transitions for conversation history
+/// Format: (previous_role, current_role)
+const VALID_ROLE_TRANSITIONS: &[(Role, Role)] = &[
+    // Initial messages can be System, Developer, or User
+    // (None is handled separately)
+    // System/Developer can transition to User or System/Developer
+    (Role::System, Role::User),
+    (Role::System, Role::System),
+    (Role::System, Role::Developer),
+    (Role::Developer, Role::User),
+    (Role::Developer, Role::System),
+    (Role::Developer, Role::Developer),
+    // User transitions to Assistant
+    (Role::User, Role::Assistant),
+    // Assistant transitions to User or Tool
+    (Role::Assistant, Role::User),
+    (Role::Assistant, Role::Tool),
+    // Tool transitions to Tool or Assistant
+    (Role::Tool, Role::Tool),
+    (Role::Tool, Role::Assistant),
+];
+
 #[allow(dead_code)]
 pub fn validate_history(history: &[TurnRecord]) -> Result<()> {
     if history.is_empty() {
@@ -291,36 +313,33 @@ pub fn validate_history(history: &[TurnRecord]) -> Result<()> {
     let mut last_role: Option<Role> = None;
 
     for (i, turn) in history.iter().enumerate() {
-        match (last_role, &turn.role) {
-            (None, Role::User) | (None, Role::System) | (None, Role::Developer) => {}
-            (None, _) => {
-                return Err(ParallaxError::Protocol(format!(
-                    "History must start with system or user message, found {:?}",
-                    turn.role
-                ))
-                .into());
+        // Check if this is a valid transition
+        let is_valid = match &last_role {
+            None => {
+                // First message must be System, Developer, or User
+                matches!(turn.role, Role::User | Role::System | Role::Developer)
             }
-            (Some(Role::System) | Some(Role::Developer), Role::User)
-            | (Some(Role::System) | Some(Role::Developer), Role::System)
-            | (Some(Role::Developer), Role::Developer) => {}
-            (Some(Role::User), Role::Assistant) => {}
-            (Some(Role::Assistant), Role::User) | (Some(Role::Assistant), Role::Tool) => {}
-            (Some(Role::Tool), Role::Tool) | (Some(Role::Tool), Role::Assistant) => {}
-            (prev, current) => {
-                let prev_display = prev
-                    .map(|r| format!("{:?}", r))
-                    .unwrap_or_else(|| "None".to_string());
-                tracing::warn!(
-                    "Invalid role transition detected: {} -> {:?}",
-                    prev_display,
-                    current
-                );
-                return Err(ParallaxError::Protocol(format!(
-                    "Invalid role transition at message {}: {} -> {:?}",
-                    i, prev_display, current
-                ))
-                .into());
+            Some(prev) => {
+                // Check if transition is in the valid list
+                VALID_ROLE_TRANSITIONS.iter().any(|(p, c)| p == prev && c == &turn.role)
             }
+        };
+
+        if !is_valid {
+            let prev_display = last_role
+                .as_ref()
+                .map(|r| format!("{:?}", r))
+                .unwrap_or_else(|| "None".to_string());
+            tracing::warn!(
+                "Invalid role transition detected: {} -> {:?}",
+                prev_display,
+                turn.role
+            );
+            return Err(ParallaxError::Protocol(format!(
+                "Invalid role transition at message {}: {} -> {:?}",
+                i, prev_display, turn.role
+            ))
+            .into());
         }
         last_role = Some(turn.role.clone());
     }

@@ -5,6 +5,13 @@ use std::path::Path;
 
 pub type DbPool = SqlitePool;
 
+// Database pragmas for performance and reliability
+const DB_PRAGMAS: &[&str] = &[
+    "PRAGMA journal_mode = WAL",
+    "PRAGMA synchronous = NORMAL",
+    "PRAGMA busy_timeout = 5000",
+];
+
 pub async fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
     let path_str = match path.as_ref().to_str() {
         Some(s) => s,
@@ -46,13 +53,7 @@ pub async fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
 
 async fn configure_db(pool: &DbPool) -> Result<()> {
     // Configure WAL mode and performance pragmas
-    let pragmas = [
-        "PRAGMA journal_mode = WAL",
-        "PRAGMA synchronous = NORMAL",
-        "PRAGMA busy_timeout = 5000",
-    ];
-
-    for pragma in pragmas {
+    for pragma in DB_PRAGMAS {
         if let Err(e) = sqlx::query(pragma).execute(pool).await {
             return Err(ParallaxError::Database(e).into());
         }

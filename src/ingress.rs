@@ -3,6 +3,11 @@ use crate::types::*;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
+// Provider detection patterns
+const GEMINI_PATTERNS: &[&str] = &["google/", "gemini"];
+const ANTHROPIC_PATTERNS: &[&str] = &["anthropic/", "claude"];
+const OPENAI_PATTERNS: &[&str] = &["openai/", "gpt"];
+
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct CursorMetadata {
     #[serde(rename = "cursorConversationId")]
@@ -37,11 +42,12 @@ impl<'de> Deserialize<'de> for ModelProvider {
     {
         let s = String::deserialize(deserializer)?;
         let lower = s.to_lowercase();
-        if lower.contains("google/") || lower.contains("gemini") {
+        
+        if GEMINI_PATTERNS.iter().any(|p| lower.contains(p)) {
             Ok(ModelProvider::Gemini(s))
-        } else if lower.contains("anthropic/") || lower.contains("claude") {
+        } else if ANTHROPIC_PATTERNS.iter().any(|p| lower.contains(p)) {
             Ok(ModelProvider::Anthropic(s))
-        } else if lower.contains("openai/") || lower.contains("gpt") {
+        } else if OPENAI_PATTERNS.iter().any(|p| lower.contains(p)) {
             Ok(ModelProvider::OpenAI(s))
         } else {
             Ok(ModelProvider::Standard(s))

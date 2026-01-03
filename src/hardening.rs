@@ -8,6 +8,25 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::RwLock;
 
+// Diff detection markers
+const DIFF_MARKERS: &[&str] = &[
+    "diff --git ",
+    "--- ",
+    "+++ ",
+    "@@ -",
+    "Index: ",
+    "Property changes on: ",
+];
+
+// Forbidden terms in plans that could trigger execution failures
+const FORBIDDEN_PLAN_TERMS: &[(&str, &str)] = &[
+    ("npm install", "package manager install"),
+    ("npm build", "package manager build"),
+    ("cargo build", "rust build"),
+    ("cargo check", "rust check"),
+    ("grep ", "ripgrep "),
+];
+
 pub struct RetryPolicy {
     pub max_attempts: u32,
     pub base_delay_ms: u64,
@@ -194,16 +213,7 @@ fn sanitize_plan_args(args: &mut Value) {
 
         // Clean up any forbidden terms that might cause execution failures
         if let Some(Value::String(plan)) = map.get_mut("plan") {
-            // Remove or replace terms that could trigger "Severity 1" violations
-            let forbidden_terms = [
-                ("npm install", "package manager install"),
-                ("npm build", "package manager build"),
-                ("cargo build", "rust build"),
-                ("cargo check", "rust check"),
-                ("grep ", "ripgrep "),
-            ];
-
-            for (forbidden, replacement) in &forbidden_terms {
+            for (forbidden, replacement) in FORBIDDEN_PLAN_TERMS {
                 if plan.contains(forbidden) {
                     *plan = plan.replace(forbidden, replacement);
                 }
@@ -237,18 +247,9 @@ pub fn is_diff_like(text: &str) -> bool {
     }
 
     // Heuristic: Check for common unified diff markers at the start of lines
-    let markers = [
-        "diff --git ",
-        "--- ",
-        "+++ ",
-        "@@ -",
-        "Index: ",
-        "Property changes on: ",
-    ];
-
     for line in text.lines() {
         let trimmed = line.trim_start();
-        for marker in &markers {
+        for marker in DIFF_MARKERS {
             if trimmed.starts_with(marker) {
                 return true;
             }

@@ -15,6 +15,33 @@ pub struct StreamHandler;
 
 const MAX_STREAM_LINES: usize = 100_000;
 
+// HTTP status codes that indicate retryable errors
+const RETRYABLE_STATUS_CODES: &[u16] = &[429, 500, 502, 503, 504, 520];
+
+// Tools that require arguments - used to detect suspicious empty argument tool calls
+const TOOLS_REQUIRING_ARGS: &[&str] = &[
+    "read_file",
+    "grep",
+    "glob_file_search",
+    "list_dir",
+    "codebase_search",
+    "run_terminal_cmd",
+    "web_search",
+    "fetch_mcp_resource",
+    "mcp_context7_query-docs",
+    "mcp_context7_resolve-library-id",
+    "mcp_docfork_docfork_search_docs",
+    "mcp_docfork_docfork_read_url",
+    "mcp_cursor-ide-browser_browser_click",
+    "mcp_cursor-ide-browser_browser_type",
+    "mcp_cursor-ide-browser_browser_select_option",
+    "mcp_cursor-ide-browser_browser_press_key",
+    "mcp_cursor-ide-browser_browser_navigate",
+];
+
+// Fallback model for Gemini when primary model fails
+const GEMINI_FLASH_FALLBACK: &str = "google/gemini-3-flash-preview-0814";
+
 impl StreamHandler {
     #[allow(clippy::too_many_arguments)]
     async fn finalize_and_log_turn(
@@ -175,26 +202,7 @@ impl StreamHandler {
                     None => false,
                 };
                 if is_empty_object {
-                    let suspicious = matches!(
-                        name.as_str(),
-                        "read_file"
-                            | "grep"
-                            | "glob_file_search"
-                            | "list_dir"
-                            | "codebase_search"
-                            | "run_terminal_cmd"
-                            | "web_search"
-                            | "fetch_mcp_resource"
-                            | "mcp_context7_query-docs"
-                            | "mcp_context7_resolve-library-id"
-                            | "mcp_docfork_docfork_search_docs"
-                            | "mcp_docfork_docfork_read_url"
-                            | "mcp_cursor-ide-browser_browser_click"
-                            | "mcp_cursor-ide-browser_browser_type"
-                            | "mcp_cursor-ide-browser_browser_select_option"
-                            | "mcp_cursor-ide-browser_browser_press_key"
-                            | "mcp_cursor-ide-browser_browser_navigate"
-                    );
+                    let suspicious = TOOLS_REQUIRING_ARGS.contains(&name.as_str());
                     if suspicious {
                         empty_arg_tools.push((id.clone(), name.clone()));
                     }
@@ -523,7 +531,7 @@ impl StreamHandler {
 
     fn is_retryable_error(err: &crate::types::ProviderError) -> bool {
         match err.error.code {
-            Some(429) | Some(500) | Some(502) | Some(503) | Some(504) | Some(520) => true,
+            Some(code) if RETRYABLE_STATUS_CODES.contains(&code) => true,
             _ => {
                 err.error.message.to_lowercase().contains("overloaded")
                     || err.error.message.to_lowercase().contains("rate limit")
@@ -611,7 +619,7 @@ impl StreamHandler {
         tx_tui: &tokio::sync::broadcast::Sender<crate::tui::TuiEvent>,
     ) -> Result<()> {
         // Find a suitable Flash model. We'll use a heuristic or common name.
-        let fallback_model = "google/gemini-3-flash-preview-0814".to_string(); // Example
+        let fallback_model = GEMINI_FLASH_FALLBACK.to_string();
         Self::execute_retry_or_fallback(state, conversation_id, fallback_model, tx, tx_tui.clone())
             .await
     }
@@ -630,15 +638,21 @@ impl StreamHandler {
             extra_body: serde_json::json!({}),
         };
 
+        let kind = crate::projections::ProviderKind::from_model_name(&model_id);
         let flavor: std::sync::Arc<dyn crate::projections::ProviderFlavor + Send + Sync> =
-            if model_id.contains("gpt") {
-                std::sync::Arc::new(crate::projections::OpenAiFlavor)
-            } else if model_id.contains("claude") {
-                std::sync::Arc::new(crate::projections::AnthropicFlavor)
-            } else if model_id.contains("gemini") {
-                std::sync::Arc::new(crate::projections::GeminiFlavor)
-            } else {
-                std::sync::Arc::new(crate::projections::StandardFlavor)
+            match kind {
+                crate::projections::ProviderKind::Google => {
+                    std::sync::Arc::new(crate::projections::GeminiFlavor)
+                }
+                crate::projections::ProviderKind::Anthropic => {
+                    std::sync::Arc::new(crate::projections::AnthropicFlavor)
+                }
+                crate::projections::ProviderKind::OpenAi => {
+                    std::sync::Arc::new(crate::projections::OpenAiFlavor)
+                }
+                crate::projections::ProviderKind::Standard => {
+                    std::sync::Arc::new(crate::projections::StandardFlavor)
+                }
             };
 
         let mut outgoing_request = crate::projections::OpenRouterAdapter::project(
@@ -840,15 +854,21 @@ impl StreamHandler {
         });
 
         // Determine flavor
+        let kind = crate::projections::ProviderKind::from_model_name(model_id);
         let flavor: std::sync::Arc<dyn crate::projections::ProviderFlavor + Send + Sync> =
-            if model_id.contains("gpt") {
-                std::sync::Arc::new(crate::projections::OpenAiFlavor)
-            } else if model_id.contains("claude") {
-                std::sync::Arc::new(crate::projections::AnthropicFlavor)
-            } else if model_id.contains("gemini") {
-                std::sync::Arc::new(crate::projections::GeminiFlavor)
-            } else {
-                std::sync::Arc::new(crate::projections::StandardFlavor)
+            match kind {
+                crate::projections::ProviderKind::Google => {
+                    std::sync::Arc::new(crate::projections::GeminiFlavor)
+                }
+                crate::projections::ProviderKind::Anthropic => {
+                    std::sync::Arc::new(crate::projections::AnthropicFlavor)
+                }
+                crate::projections::ProviderKind::OpenAi => {
+                    std::sync::Arc::new(crate::projections::OpenAiFlavor)
+                }
+                crate::projections::ProviderKind::Standard => {
+                    std::sync::Arc::new(crate::projections::StandardFlavor)
+                }
             };
 
         let intent = None;

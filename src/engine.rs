@@ -15,6 +15,45 @@ pub enum TurnOperationEntry {
     Standard(TurnOperation<ModelProvider>),
 }
 
+impl TurnOperationEntry {
+    /// Decompose the entry into its constituent parts: (model_id, context, request_id, flavor)
+    pub fn into_parts(
+        self,
+    ) -> (
+        String,
+        ConversationContext,
+        String,
+        std::sync::Arc<dyn crate::projections::ProviderFlavor + Send + Sync>,
+    ) {
+        match self {
+            TurnOperationEntry::Gemini(op) => (
+                op.model.model_name().to_string(),
+                op.input_context,
+                op.request_id,
+                std::sync::Arc::new(crate::projections::GeminiFlavor),
+            ),
+            TurnOperationEntry::Anthropic(op) => (
+                op.model.model_name().to_string(),
+                op.input_context,
+                op.request_id,
+                std::sync::Arc::new(crate::projections::AnthropicFlavor),
+            ),
+            TurnOperationEntry::OpenAI(op) => (
+                op.model.model_name().to_string(),
+                op.input_context,
+                op.request_id,
+                std::sync::Arc::new(crate::projections::OpenAiFlavor),
+            ),
+            TurnOperationEntry::Standard(op) => (
+                op.model.model_name().to_string(),
+                op.input_context,
+                op.request_id,
+                std::sync::Arc::new(crate::projections::StandardFlavor),
+            ),
+        }
+    }
+}
+
 pub struct ParallaxEngine;
 
 const MAX_HISTORY_LENGTH: usize = 1000;

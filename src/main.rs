@@ -7,12 +7,8 @@ use parallax::tui::{App, TuiEvent};
 use parallax::*;
 
 use parallax::ingress::RawTurn;
-use parallax::projections::AnthropicFlavor;
-use parallax::projections::GeminiFlavor;
-use parallax::projections::OpenAiFlavor;
 use parallax::projections::OpenRouterAdapter;
 use parallax::projections::ProviderFlavor;
-use parallax::projections::StandardFlavor;
 use parallax::streaming::StreamHandler;
 
 use axum::{
@@ -153,19 +149,22 @@ fn detect_intent_tag(clean_content: &str) -> Option<crate::tui::Intent> {
     None
 }
 
+// Intent detection keywords
+const PLAN_KEYWORDS: &[&str] = &[" PLAN MODE", " PLANNING MODE"];
+const AGENT_KEYWORDS: &[&str] = &[" AGENT MODE", " COMPOSER MODE", " BUILD MODE"];
+const DEBUG_KEYWORDS: &[&str] = &[" DEBUG MODE"];
+const ASK_KEYWORDS: &[&str] = &[" ASK MODE", " CHAT MODE"];
+
 fn detect_intent_keywords(search_window: &str) -> Option<crate::tui::Intent> {
     let content = search_window.to_uppercase();
 
-    let intent = if content.contains(" PLAN MODE") || content.contains(" PLANNING MODE") {
+    let intent = if PLAN_KEYWORDS.iter().any(|k| content.contains(k)) {
         Some(crate::tui::Intent::Plan)
-    } else if content.contains(" AGENT MODE")
-        || content.contains(" COMPOSER MODE")
-        || content.contains(" BUILD MODE")
-    {
+    } else if AGENT_KEYWORDS.iter().any(|k| content.contains(k)) {
         Some(crate::tui::Intent::Agent)
-    } else if content.contains(" DEBUG MODE") {
+    } else if DEBUG_KEYWORDS.iter().any(|k| content.contains(k)) {
         Some(crate::tui::Intent::Debug)
-    } else if content.contains(" ASK MODE") || content.contains(" CHAT MODE") {
+    } else if ASK_KEYWORDS.iter().any(|k| content.contains(k)) {
         Some(crate::tui::Intent::Ask)
     } else {
         None
@@ -417,32 +416,7 @@ fn resolve_flavor_context(
     String,
     Arc<dyn ProviderFlavor + Send + Sync>,
 ) {
-    match entry {
-        TurnOperationEntry::Gemini(op) => (
-            op.model.model_name().to_string(),
-            op.input_context,
-            op.request_id,
-            Arc::new(GeminiFlavor),
-        ),
-        TurnOperationEntry::Anthropic(op) => (
-            op.model.model_name().to_string(),
-            op.input_context,
-            op.request_id,
-            Arc::new(AnthropicFlavor),
-        ),
-        TurnOperationEntry::OpenAI(op) => (
-            op.model.model_name().to_string(),
-            op.input_context,
-            op.request_id,
-            Arc::new(OpenAiFlavor),
-        ),
-        TurnOperationEntry::Standard(op) => (
-            op.model.model_name().to_string(),
-            op.input_context,
-            op.request_id,
-            Arc::new(StandardFlavor),
-        ),
-    }
+    entry.into_parts()
 }
 
 #[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
