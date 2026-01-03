@@ -1,5 +1,3 @@
-#![allow(clippy::manual_unwrap_or_default)]
-#![allow(clippy::manual_unwrap_or)]
 use crate::db::DbPool;
 use crate::ingress::*;
 use crate::types::*;
@@ -15,45 +13,6 @@ pub enum TurnOperationEntry {
     Anthropic(TurnOperation<ModelProvider>),
     OpenAI(TurnOperation<ModelProvider>),
     Standard(TurnOperation<ModelProvider>),
-}
-
-impl TurnOperationEntry {
-    /// Decompose the entry into its constituent parts: (model_id, context, request_id, flavor)
-    pub fn into_parts(
-        self,
-    ) -> (
-        String,
-        ConversationContext,
-        String,
-        std::sync::Arc<dyn crate::projections::ProviderFlavor + Send + Sync>,
-    ) {
-        match self {
-            TurnOperationEntry::Gemini(op) => (
-                op.model.model_name().to_string(),
-                op.input_context,
-                op.request_id,
-                std::sync::Arc::new(crate::projections::GeminiFlavor),
-            ),
-            TurnOperationEntry::Anthropic(op) => (
-                op.model.model_name().to_string(),
-                op.input_context,
-                op.request_id,
-                std::sync::Arc::new(crate::projections::AnthropicFlavor),
-            ),
-            TurnOperationEntry::OpenAI(op) => (
-                op.model.model_name().to_string(),
-                op.input_context,
-                op.request_id,
-                std::sync::Arc::new(crate::projections::OpenAiFlavor),
-            ),
-            TurnOperationEntry::Standard(op) => (
-                op.model.model_name().to_string(),
-                op.input_context,
-                op.request_id,
-                std::sync::Arc::new(crate::projections::StandardFlavor),
-            ),
-        }
-    }
 }
 
 pub struct ParallaxEngine;
@@ -79,26 +38,7 @@ impl ParallaxEngine {
             .into());
         }
 
-        let total_tool_calls: usize = context
-            .history
-            .iter()
-            .map(|record| {
-                record
-                    .content
-                    .iter()
-                    .filter(|part| matches!(part, MessagePart::ToolCall { .. }))
-                    .count()
-            })
-            .sum();
-
-        if total_tool_calls > MAX_TOOL_CALLS_PER_REQUEST {
-            return Err(ParallaxError::InvalidIngress(format!(
-                "Total tool calls ({}) exceeds limit of {}",
-                total_tool_calls, MAX_TOOL_CALLS_PER_REQUEST
-            ))
-            .into());
-        }
-
+        let mut total_tool_calls = 0;
         for (i, record) in context.history.iter().enumerate() {
             if record.content.len() > MAX_MESSAGE_PARTS {
                 return Err(ParallaxError::InvalidIngress(format!(
@@ -106,6 +46,12 @@ impl ParallaxEngine {
                     i, MAX_MESSAGE_PARTS
                 ))
                 .into());
+            }
+
+            for part in &record.content {
+                if matches!(part, MessagePart::ToolCall { .. }) {
+                    total_tool_calls += 1;
+                }
             }
 
             if record.role == Role::Tool {
@@ -130,6 +76,14 @@ impl ParallaxEngine {
             }
         }
 
+        if total_tool_calls > MAX_TOOL_CALLS_PER_REQUEST {
+            return Err(ParallaxError::InvalidIngress(format!(
+                "Total tool calls ({}) exceeds limit of {}",
+                total_tool_calls, MAX_TOOL_CALLS_PER_REQUEST
+            ))
+            .into());
+        }
+
         Ok(())
     }
 
@@ -146,10 +100,17 @@ impl ParallaxEngine {
         // Pass 2: Coalesce sequential records
         let history = Self::coalesce_history(raw_records);
 
+        // Preserve ingress `stream` preference (Cursor/OpenAI clients may send stream=false)
+        // by copying it into the extra body that gets projected upstream.
+        let mut extra_body = raw.extra;
+        if let serde_json::Value::Object(map) = &mut extra_body {
+            map.insert("stream".to_string(), serde_json::Value::Bool(raw.stream));
+        }
+
         let context = ConversationContext {
             history,
             conversation_id: anchor_hash,
-            extra_body: raw.extra,
+            extra_body,
         };
 
         Self::route_model(raw.model, context, request_id)
@@ -164,11 +125,11 @@ impl ParallaxEngine {
         for mut raw_rec in messages {
             if raw_rec.role.is_none() {
                 if let Some(t) = &raw_rec.type_ {
-                    raw_rec.role = Some(match t.as_str() {
-                        "function_call" => Role::Assistant,
-                        "function_call_output" => Role::Tool,
-                        _ => Role::User,
-                    });
+                    raw_rec.role = match t.as_str() {
+                        "function_call" => Some(Role::Assistant),
+                        "function_call_output" => Some(Role::Tool),
+                        _ => Some(Role::User),
+                    };
                 }
             }
             raw_records.push(Self::lift_record(raw_rec, anchor_hash, db).await?);
@@ -179,22 +140,16 @@ impl ParallaxEngine {
     fn coalesce_history(raw_records: Vec<TurnRecord>) -> Vec<TurnRecord> {
         let mut history: Vec<TurnRecord> = Vec::new();
         for rec in raw_records {
-            let should_coalesce = match history.last() {
-                Some(last) => {
-                    last.role == rec.role && rec.role != Role::User && rec.role != Role::Tool
-                }
-                None => false,
-            };
-
-            if should_coalesce {
-                let last = if let Some(l) = history.last_mut() {
-                    l
+            if let Some(last) = history.last_mut() {
+                if last.role == rec.role && rec.role != Role::User && rec.role != Role::Tool
+                // Tool results MUST remain separate messages
+                {
+                    last.content.extend(rec.content);
+                    if last.tool_call_id.is_none() {
+                        last.tool_call_id = rec.tool_call_id;
+                    }
                 } else {
-                    panic!("Checked in should_coalesce")
-                };
-                last.content.extend(rec.content);
-                if last.tool_call_id.is_none() {
-                    last.tool_call_id = rec.tool_call_id;
+                    history.push(rec);
                 }
             } else {
                 history.push(rec);
@@ -255,11 +210,9 @@ impl ParallaxEngine {
         }
 
         // 2. Handle legacy OpenAI function_call
-        if let (Some(name), Some(args), Some(id)) = (
-            raw_rec.name.as_ref(),
-            raw_rec.arguments.as_ref(),
-            raw_rec.call_id.as_ref(),
-        ) {
+        if let (Some(name), Some(args), Some(id)) =
+            (&raw_rec.name, &raw_rec.arguments, &raw_rec.call_id)
+        {
             let parsed_args = match crate::json_repair::repair_tool_call_arguments(name, args) {
                 Ok(val) => val,
                 Err(e) => {
@@ -313,14 +266,16 @@ impl ParallaxEngine {
         }
 
         // 4. Handle legacy OpenAI function_call_output
+        let tool_id = raw_rec.tool_call_id.clone().or(raw_rec.call_id.clone());
         if role == Role::Tool {
-            if let Some(call_id) = raw_rec.tool_call_id.clone().or(raw_rec.call_id.clone()) {
-                let content_str = match raw_rec.output {
-                    Some(o) => o,
-                    None => match parts.first() {
+            if let Some(call_id) = tool_id {
+                let content_str = if let Some(o) = raw_rec.output {
+                    o
+                } else {
+                    match parts.first() {
                         Some(MessagePart::Text { content, .. }) => content.clone(),
                         _ => String::new(),
-                    },
+                    }
                 };
                 parts = vec![MessagePart::ToolResult {
                     tool_call_id: call_id,
@@ -461,7 +416,10 @@ impl ParallaxEngine {
                 "[⚙️  -> ⚙️ ] Sticky Signature Saved for {}: {} bytes ({} reasoning tokens)",
                 tool_id,
                 sig_json.len(),
-                if let Some(v) = reasoning_tokens { v } else { 0 }
+                match reasoning_tokens {
+                    Some(t) => t,
+                    None => 0,
+                }
             );
 
             sqlx::query("INSERT OR REPLACE INTO tool_signatures (id, conversation_id, signature, reasoning_tokens, thought_signature) VALUES (?1, ?2, ?3, ?4, ?5)")

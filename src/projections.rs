@@ -1,5 +1,3 @@
-#![allow(clippy::manual_unwrap_or_default)]
-#![allow(clippy::manual_unwrap_or)]
 use crate::specs::openai::*;
 use crate::types::*;
 use std::collections::HashMap;
@@ -10,19 +8,6 @@ pub enum ProviderKind {
     Anthropic,
     OpenAi,
     Standard,
-}
-
-impl ProviderKind {
-    /// Detect provider kind from a model name
-    pub fn from_model_name(model_name: &str) -> Self {
-        let lower = model_name.to_lowercase();
-        match lower {
-            m if m.contains("gpt") || m.contains("openai/") => ProviderKind::OpenAi,
-            m if m.contains("claude") || m.contains("anthropic/") => ProviderKind::Anthropic,
-            m if m.contains("gemini") || m.contains("google/") => ProviderKind::Google,
-            _ => ProviderKind::Standard,
-        }
-    }
 }
 
 pub trait ProviderFlavor: Send + Sync {
@@ -136,6 +121,15 @@ impl OpenRouterAdapter {
 
         let stop = Some(flavor.stop_sequences());
 
+        let stream = match context
+            .extra_body
+            .get("stream")
+            .and_then(|v| v.as_bool())
+        {
+            Some(s) => s,
+            None => true,
+        };
+
         let tools = Self::extract_tools(&context.extra_body);
         let tool_choice = context
             .extra_body
@@ -145,7 +139,7 @@ impl OpenRouterAdapter {
         OpenAiRequest {
             model: model_id.to_string(),
             messages,
-            stream: Some(true),
+            stream: Some(stream),
             temperature: context
                 .extra_body
                 .get("temperature")
@@ -409,20 +403,12 @@ impl OpenRouterAdapter {
 
         OpenAiMessage::Assistant {
             content: final_content,
-            reasoning: if thoughts.is_empty() {
-                None
-            } else {
-                Some(thoughts.join("\n"))
-            },
+            reasoning: if thoughts.is_empty() { None } else { Some(thoughts.join("\n")) },
             tool_calls,
         }
     }
 
-    fn apply_gemini_fix(
-        text_content: &str,
-        flavor: &dyn ProviderFlavor,
-        tool_calls: &[OpenAiToolCall],
-    ) -> Option<String> {
+    fn apply_gemini_fix(text_content: &str, flavor: &dyn ProviderFlavor, tool_calls: &[OpenAiToolCall]) -> Option<String> {
         // GEMINI FIX: Gemini requires every message to have at least one "parts" field.
         // When an assistant message has tool calls but no text content, we must provide
         // at least an empty string to ensure OpenRouter can transform it into a valid
@@ -461,7 +447,9 @@ impl OpenRouterAdapter {
             None => {
                 let found = record.content.iter().find_map(|p| {
                     if let MessagePart::ToolResult {
-                        tool_call_id, name, ..
+                        tool_call_id,
+                        name,
+                        ..
                     } = p
                     {
                         Some((tool_call_id.clone(), name.clone()))
@@ -578,7 +566,10 @@ impl OpenRouterAdapter {
             .map(|v| v as u32);
         if is_thinking {
             // Force at least 64k tokens for thinking models to prevent cutoffs
-            let max_tokens_val = if let Some(v) = max_tokens { v } else { 0 };
+            let max_tokens_val = match max_tokens {
+                Some(v) => v,
+                None => 0,
+            };
             if max_tokens_val < 64000 {
                 max_tokens = Some(64000);
             }

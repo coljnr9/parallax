@@ -1,9 +1,3 @@
-#![allow(clippy::manual_unwrap_or_default)]
-#![allow(clippy::manual_unwrap_or)]
-use crate::constants::{
-    GEMINI_FLASH_FALLBACK, OPENROUTER_CHAT_COMPLETIONS, RETRYABLE_STATUS_CODES,
-    TOOLS_REQUIRING_ARGS,
-};
 use crate::db::DbPool;
 use crate::engine::ParallaxEngine;
 use crate::types::LineEvent;
@@ -16,14 +10,6 @@ use futures_util::StreamExt;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, LinesCodec};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamState {
-    Initial,
-    BufferingUntilToolOrDone,
-    StreamingToClient,
-    Finished,
-}
 
 pub struct StreamHandler;
 
@@ -39,10 +25,9 @@ impl StreamHandler {
         request_id: &str,
         start_time: std::time::Instant,
     ) {
-        let finalized_turn_val = if let Ok(v) = serde_json::to_value(finalized_turn) {
-            v
-        } else {
-            serde_json::Value::Null
+        let finalized_turn_val = match serde_json::to_value(finalized_turn) {
+            Ok(v) => v,
+            Err(_) => serde_json::Value::Null,
         };
         crate::debug_utils::capture_debug_snapshot(
             "final",
@@ -92,7 +77,7 @@ impl StreamHandler {
         let mut tool_index_map = HashMap::<u32, String>::new();
         let mut metrics = crate::logging::StreamMetric::new();
         let mut line_count = 0;
-        let mut stream_state = StreamState::Initial;
+        let mut has_seen_tool_call = false;
         let mut buffered_pulses = Vec::new();
 
         while let Some(line_result) = lines_stream.next().await {
@@ -114,7 +99,7 @@ impl StreamHandler {
             let should_break = Self::process_stream_line(
                 line_result,
                 &mut metrics,
-                &mut stream_state,
+                &mut has_seen_tool_call,
                 &mut accumulator,
                 &mut tool_index_map,
                 &conversation_id,
@@ -145,7 +130,7 @@ impl StreamHandler {
             &metrics,
             start_time,
             tools_were_advertised,
-            stream_state,
+            has_seen_tool_call,
             state,
             &buffered_pulses,
         )
@@ -165,7 +150,7 @@ impl StreamHandler {
         metrics: &crate::logging::StreamMetric,
         start_time: std::time::Instant,
         tools_were_advertised: bool,
-        stream_state: StreamState,
+        has_seen_tool_call: bool,
         state: std::sync::Arc<AppState>,
         buffered_pulses: &[ProviderPulse],
     ) {
@@ -179,22 +164,37 @@ impl StreamHandler {
 
         let finalized_turn = accumulator.clone().finalize();
 
-        // Detect tool calls that ended up with empty arguments.
+        // Detect tool calls that ended up with empty arguments. This is almost always a provider/
+        // streaming delta issue (e.g., missing tool_call ids across chunks) and is worth surfacing.
+        // We only warn for tools that plausibly require parameters.
         let mut empty_arg_tools: Vec<(String, String)> = Vec::new();
         for part in &finalized_turn.content {
-            if let crate::types::MessagePart::ToolCall {
-                id,
-                name,
-                arguments,
-                ..
-            } = part
-            {
+            if let crate::types::MessagePart::ToolCall { id, name, arguments, .. } = part {
                 let is_empty_object = match arguments.as_object() {
                     Some(m) => m.is_empty(),
                     None => false,
                 };
                 if is_empty_object {
-                    let suspicious = TOOLS_REQUIRING_ARGS.contains(&name.as_str());
+                    let suspicious = matches!(
+                        name.as_str(),
+                        "read_file"
+                            | "grep"
+                            | "glob_file_search"
+                            | "list_dir"
+                            | "codebase_search"
+                            | "run_terminal_cmd"
+                            | "web_search"
+                            | "fetch_mcp_resource"
+                            | "mcp_context7_query-docs"
+                            | "mcp_context7_resolve-library-id"
+                            | "mcp_docfork_docfork_search_docs"
+                            | "mcp_docfork_docfork_read_url"
+                            | "mcp_cursor-ide-browser_browser_click"
+                            | "mcp_cursor-ide-browser_browser_type"
+                            | "mcp_cursor-ide-browser_browser_select_option"
+                            | "mcp_cursor-ide-browser_browser_press_key"
+                            | "mcp_cursor-ide-browser_browser_navigate"
+                    );
                     if suspicious {
                         empty_arg_tools.push((id.clone(), name.clone()));
                     }
@@ -225,11 +225,8 @@ impl StreamHandler {
             });
         }
 
-        // Check for diff-only response if tools were advertised but we're still buffering
-        if tools_were_advertised
-            && (stream_state == StreamState::BufferingUntilToolOrDone
-                || stream_state == StreamState::Initial)
-        {
+        // Check for diff-only response if tools were advertised but none were seen
+        if tools_were_advertised && !has_seen_tool_call {
             let mut text_content = String::new();
             for part in &finalized_turn.content {
                 if let MessagePart::Text { content, .. } = part {
@@ -267,10 +264,6 @@ impl StreamHandler {
                 {
                     tracing::error!("[⚙️ ] Retry failed: {}", e);
                     let _ = tx.send(Err(e.inner)).await;
-                    // CRITICAL FIX: Send [DONE] even when retry fails
-                    let _ = tx
-                        .send(Ok(axum::response::sse::Event::default().data("[DONE]")))
-                        .await;
                 }
                 return;
             } else {
@@ -314,10 +307,6 @@ impl StreamHandler {
                 {
                     tracing::error!("[⚙️ ] Fallback failed: {}", e);
                     let _ = tx.send(Err(e.inner)).await;
-                    // CRITICAL FIX: Send [DONE] even when fallback fails
-                    let _ = tx
-                        .send(Ok(axum::response::sse::Event::default().data("[DONE]")))
-                        .await;
                 }
                 return;
             }
@@ -332,11 +321,6 @@ impl StreamHandler {
                     error_msg,
                 )))
                 .await;
-            // CRITICAL FIX: Send [DONE] after error
-            let _ = tx
-                .send(Ok(axum::response::sse::Event::default().data("[DONE]")))
-                .await;
-            return;
         }
 
         Self::finalize_and_log_turn(
@@ -363,7 +347,7 @@ impl StreamHandler {
     async fn process_stream_line(
         line_result: std::result::Result<String, tokio_util::codec::LinesCodecError>,
         metrics: &mut crate::logging::StreamMetric,
-        stream_state: &mut StreamState,
+        has_seen_tool_call: &mut bool,
         accumulator: &mut TurnAccumulator,
         tool_index_map: &mut HashMap<u32, String>,
         conversation_id: &str,
@@ -380,14 +364,13 @@ impl StreamHandler {
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" {
                         tracing::debug!("[☁️  -> ⚙️ ] Stream end marker [DONE] received");
-                        *stream_state = StreamState::Finished;
                         return Some(true);
                     }
 
                     return Self::handle_provider_line(
                         data,
                         metrics,
-                        stream_state,
+                        has_seen_tool_call,
                         accumulator,
                         tool_index_map,
                         conversation_id,
@@ -404,7 +387,6 @@ impl StreamHandler {
             }
             Err(e) => {
                 Self::handle_line_error(e, tx).await;
-                *stream_state = StreamState::Finished;
                 return Some(true);
             }
         }
@@ -431,7 +413,7 @@ impl StreamHandler {
     async fn handle_provider_line(
         data: &str,
         metrics: &mut crate::logging::StreamMetric,
-        stream_state: &mut StreamState,
+        has_seen_tool_call: &mut bool,
         accumulator: &mut TurnAccumulator,
         tool_index_map: &mut HashMap<u32, String>,
         conversation_id: &str,
@@ -448,7 +430,7 @@ impl StreamHandler {
                 Self::handle_pulse_event(
                     pulse,
                     metrics,
-                    stream_state,
+                    has_seen_tool_call,
                     accumulator,
                     tool_index_map,
                     conversation_id,
@@ -474,7 +456,7 @@ impl StreamHandler {
                     data,
                     &err,
                     tx,
-                    *stream_state == StreamState::StreamingToClient,
+                    *has_seen_tool_call,
                     state,
                     conversation_id.to_string(),
                     model_id,
@@ -482,7 +464,6 @@ impl StreamHandler {
                     tx_tui.clone(),
                 )
                 .await;
-                *stream_state = StreamState::Finished;
                 Some(true)
             }
             crate::types::LineEvent::Unknown(_) => {
@@ -492,11 +473,7 @@ impl StreamHandler {
         }
     }
 
-    fn detect_520_error(err: &crate::types::ProviderError) -> bool {
-        err.error.code == Some(520)
-    }
-
-    #[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
+    #[allow(clippy::too_many_arguments)]
     async fn handle_provider_error(
         data: &str,
         err: &crate::types::ProviderError,
@@ -505,25 +482,14 @@ impl StreamHandler {
         state: std::sync::Arc<AppState>,
         conversation_id: String,
         model_id: String,
-        request_id: String,
+        _request_id: String,
         tx_tui: tokio::sync::broadcast::Sender<crate::tui::TuiEvent>,
     ) {
-        let err_str = if let Ok(s) = serde_json::to_string(err) {
-            s
-        } else {
-            String::new()
+        let err_str = match serde_json::to_string(err) {
+            Ok(s) => s,
+            Err(_) => String::new(),
         };
-        
-        // Detect 520 errors specifically
-        if Self::detect_520_error(err) {
-            tracing::error!(
-                "[☁️  -> ⚙️ ] Stream Error 520 (Provider Web Server Error) [request_id: {}]: {}",
-                request_id,
-                err_str
-            );
-        } else {
-            tracing::error!("[☁️  -> ⚙️ ] Stream Error: {}", err_str);
-        }
+        tracing::error!("[☁️  -> ⚙️ ] Stream Error: {}", err_str);
 
         // Classification & Retry Logic
         let is_retryable = Self::is_retryable_error(err);
@@ -566,7 +532,7 @@ impl StreamHandler {
 
     fn is_retryable_error(err: &crate::types::ProviderError) -> bool {
         match err.error.code {
-            Some(code) if RETRYABLE_STATUS_CODES.contains(&code) => true,
+            Some(429) | Some(500) | Some(502) | Some(503) | Some(504) | Some(520) => true,
             _ => {
                 err.error.message.to_lowercase().contains("overloaded")
                     || err.error.message.to_lowercase().contains("rate limit")
@@ -654,7 +620,7 @@ impl StreamHandler {
         tx_tui: &tokio::sync::broadcast::Sender<crate::tui::TuiEvent>,
     ) -> Result<()> {
         // Find a suitable Flash model. We'll use a heuristic or common name.
-        let fallback_model = GEMINI_FLASH_FALLBACK.to_string();
+        let fallback_model = "google/gemini-3-flash-preview-0814".to_string(); // Example
         Self::execute_retry_or_fallback(state, conversation_id, fallback_model, tx, tx_tui.clone())
             .await
     }
@@ -673,21 +639,15 @@ impl StreamHandler {
             extra_body: serde_json::json!({}),
         };
 
-        let kind = crate::projections::ProviderKind::from_model_name(&model_id);
         let flavor: std::sync::Arc<dyn crate::projections::ProviderFlavor + Send + Sync> =
-            match kind {
-                crate::projections::ProviderKind::Google => {
-                    std::sync::Arc::new(crate::projections::GeminiFlavor)
-                }
-                crate::projections::ProviderKind::Anthropic => {
-                    std::sync::Arc::new(crate::projections::AnthropicFlavor)
-                }
-                crate::projections::ProviderKind::OpenAi => {
-                    std::sync::Arc::new(crate::projections::OpenAiFlavor)
-                }
-                crate::projections::ProviderKind::Standard => {
-                    std::sync::Arc::new(crate::projections::StandardFlavor)
-                }
+            if model_id.contains("gpt") {
+                std::sync::Arc::new(crate::projections::OpenAiFlavor)
+            } else if model_id.contains("claude") {
+                std::sync::Arc::new(crate::projections::AnthropicFlavor)
+            } else if model_id.contains("gemini") {
+                std::sync::Arc::new(crate::projections::GeminiFlavor)
+            } else {
+                std::sync::Arc::new(crate::projections::StandardFlavor)
             };
 
         let mut outgoing_request = crate::projections::OpenRouterAdapter::project(
@@ -703,7 +663,7 @@ impl StreamHandler {
 
         let response = state
             .client
-            .post(OPENROUTER_CHAT_COMPLETIONS)
+            .post("https://openrouter.ai/api/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", state.openrouter_key))
             .json(&outgoing_request)
             .send()
@@ -768,7 +728,7 @@ impl StreamHandler {
     async fn handle_pulse_event(
         mut pulse: ProviderPulse,
         metrics: &mut crate::logging::StreamMetric,
-        stream_state: &mut StreamState,
+        has_seen_tool_call: &mut bool,
         accumulator: &mut TurnAccumulator,
         tool_index_map: &mut HashMap<u32, String>,
         conversation_id: &str,
@@ -780,40 +740,21 @@ impl StreamHandler {
     ) {
         metrics.record_chunk(&pulse);
 
-        let has_tool_calls = pulse.choices.iter().any(|c| c.delta.tool_calls.is_some());
-
-        match stream_state {
-            StreamState::Initial => {
-                if has_tool_calls {
-                    *stream_state = StreamState::StreamingToClient;
-                } else if tools_were_advertised {
-                    *stream_state = StreamState::BufferingUntilToolOrDone;
-                } else {
-                    *stream_state = StreamState::StreamingToClient;
-                }
-            }
-            StreamState::BufferingUntilToolOrDone => {
-                if has_tool_calls {
-                    *stream_state = StreamState::StreamingToClient;
-                }
-            }
-            _ => {}
-        }
-
-        if *stream_state == StreamState::StreamingToClient {
-            Self::sanitize_tool_calls_in_place(&mut pulse);
-        }
+        Self::sanitize_tool_calls(&mut pulse, has_seen_tool_call);
 
         tracing::trace!("[☁️  -> ⚙️ ] Pulse: {:?}", pulse);
         Self::process_pulse(&pulse, conversation_id, tool_index_map, accumulator).await;
 
-        if *stream_state == StreamState::BufferingUntilToolOrDone {
+        // If tools were advertised but we haven't seen any tool calls yet,
+        // we buffer the response instead of sending it directly to the client.
+        // This is to allow for the diff-only guard to trigger if needed.
+        if tools_were_advertised && !*has_seen_tool_call {
             buffered_pulses.push(pulse);
             return;
         }
 
-        // Send buffered pulses if we just transitioned to streaming
-        if *stream_state == StreamState::StreamingToClient && !buffered_pulses.is_empty() {
+        // Send buffered pulses if this is the first tool call
+        if *has_seen_tool_call && !buffered_pulses.is_empty() {
             for p in buffered_pulses.drain(..) {
                 if let Ok(json) = serde_json::to_string(&p) {
                     if tx
@@ -844,19 +785,15 @@ impl StreamHandler {
             let tool_call_desc = match choice.delta.tool_calls.as_ref() {
                 Some(tcs) => tcs.iter().find_map(|tc| {
                     tc.function.as_ref().map(|f| {
-                        format!(
-                            "{}({})",
-                            if let Some(n) = f.name.as_deref() {
-                                n
-                            } else {
-                                ""
-                            },
-                            if let Some(a) = f.arguments.as_deref() {
-                                a
-                            } else {
-                                ""
-                            }
-                        )
+                        let name = match f.name.as_deref() {
+                            Some(s) => s,
+                            None => "",
+                        };
+                        let args = match f.arguments.as_deref() {
+                            Some(s) => s,
+                            None => "",
+                        };
+                        format!("{}({})", name, args)
                     })
                 }),
                 None => None,
@@ -890,19 +827,6 @@ impl StreamHandler {
         }
     }
 
-    fn sanitize_tool_calls_in_place(pulse: &mut ProviderPulse) {
-        for choice in &mut pulse.choices {
-            if choice.delta.content.is_some() {
-                choice.delta.content = None;
-            }
-            if let Some(reason) = &choice.finish_reason {
-                if reason == "stop" {
-                    choice.finish_reason = Some("tool_calls".to_string());
-                }
-            }
-        }
-    }
-
     async fn retry_with_diff_enforcement(
         state: std::sync::Arc<AppState>,
         conversation_id: &str,
@@ -931,21 +855,15 @@ impl StreamHandler {
         });
 
         // Determine flavor
-        let kind = crate::projections::ProviderKind::from_model_name(model_id);
         let flavor: std::sync::Arc<dyn crate::projections::ProviderFlavor + Send + Sync> =
-            match kind {
-                crate::projections::ProviderKind::Google => {
-                    std::sync::Arc::new(crate::projections::GeminiFlavor)
-                }
-                crate::projections::ProviderKind::Anthropic => {
-                    std::sync::Arc::new(crate::projections::AnthropicFlavor)
-                }
-                crate::projections::ProviderKind::OpenAi => {
-                    std::sync::Arc::new(crate::projections::OpenAiFlavor)
-                }
-                crate::projections::ProviderKind::Standard => {
-                    std::sync::Arc::new(crate::projections::StandardFlavor)
-                }
+            if model_id.contains("gpt") {
+                std::sync::Arc::new(crate::projections::OpenAiFlavor)
+            } else if model_id.contains("claude") {
+                std::sync::Arc::new(crate::projections::AnthropicFlavor)
+            } else if model_id.contains("gemini") {
+                std::sync::Arc::new(crate::projections::GeminiFlavor)
+            } else {
+                std::sync::Arc::new(crate::projections::StandardFlavor)
             };
 
         let intent = None;
@@ -971,7 +889,7 @@ impl StreamHandler {
         // Execute retry
         let response = state
             .client
-            .post(OPENROUTER_CHAT_COMPLETIONS)
+            .post("https://openrouter.ai/api/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", state.openrouter_key))
             .json(&outgoing_request)
             .send()
@@ -1016,6 +934,22 @@ impl StreamHandler {
         }
 
         Ok(())
+    }
+
+    fn sanitize_tool_calls(pulse: &mut ProviderPulse, has_seen_tool_call: &mut bool) {
+        if *has_seen_tool_call || pulse.choices.iter().any(|c| c.delta.tool_calls.is_some()) {
+            *has_seen_tool_call = true;
+            for choice in &mut pulse.choices {
+                if choice.delta.content.is_some() {
+                    choice.delta.content = None;
+                }
+                if let Some(reason) = &choice.finish_reason {
+                    if reason == "stop" {
+                        choice.finish_reason = Some("tool_calls".to_string());
+                    }
+                }
+            }
+        }
     }
 
     fn compute_and_send_cost(
@@ -1103,8 +1037,8 @@ impl StreamHandler {
                     Some(f) => f.name.clone(),
                     None => None,
                 },
-                arguments_delta: match td.function.as_ref().and_then(|f| f.arguments.as_ref()) {
-                    Some(a) => a.clone(),
+                arguments_delta: match td.function.as_ref().and_then(|f| f.arguments.clone()) {
+                    Some(s) => s,
                     None => String::new(),
                 },
                 metadata: Some(serde_json::Value::Object(td.extra.clone())),
@@ -1232,8 +1166,9 @@ impl StreamHandler {
                     .prompt_tokens_details
                     .as_ref()
                     .and_then(|d| d.cached_tokens)
+                    .map(|c| format!(" ({} cached)", c))
                 {
-                    Some(c) => format!(" ({} cached)", c),
+                    Some(s) => s,
                     None => String::new(),
                 };
                 format!(
@@ -1245,10 +1180,10 @@ impl StreamHandler {
         };
 
         tracing::info!(
-            "Stream Finished. Latency: {:?}\n\
-             Summary: {}\n\
-             Stats: {} chars text, {} chars thought, {} tools\n\
-             Tokens: {}",
+            "[⚙️  -> 🖱️ ] Stream Finished. Latency: {:?}\n\
+             [⚙️  -> 🖱️ ] Summary: {}\n\
+             [⚙️  -> 🖱️ ] Stats: {} chars text, {} chars thought, {} tools\n\
+             [⚙️  -> 🖱️ ] Tokens: {}",
             latency,
             parts_summary.join(", "),
             total_text_len,

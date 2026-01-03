@@ -44,6 +44,8 @@ pub struct AppState {
     pub disable_rescue: bool,
     pub args: Arc<Args>,
     pub tx_kernel: tokio::sync::mpsc::Sender<crate::kernel::KernelCommand>,
+    pub health: Arc<crate::types::UpstreamHealth>,
+    pub circuit_breaker: Arc<crate::hardening::CircuitBreaker>,
 }
 
 pub struct CostBreakdown {
