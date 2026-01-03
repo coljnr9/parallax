@@ -1,3 +1,4 @@
+#![allow(clippy::manual_unwrap_or)]
 use crate::redaction::{redact_value, RedactionLevel};
 use crate::str_utils;
 use serde::{Deserialize, Serialize};
@@ -73,10 +74,10 @@ impl FlightRecorder {
     }
 
     fn get_capture_path(&self) -> (String, String) {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
+        let timestamp = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d.as_millis(),
+            Err(_) => 0,
+        };
         let safe_model = self.model_id.replace("/", "_").replace(":", "_");
         let safe_cid = str_utils::prefix_chars(&self.conversation_id, 8);
         let filename = format!(
@@ -140,9 +141,10 @@ impl FlightRecorder {
                 Err(_) => continue,
             };
             if metadata.is_file() {
-                let modified = metadata
-                    .modified()
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                let modified = match metadata.modified() {
+                    Ok(m) => m,
+                    Err(_) => std::time::SystemTime::UNIX_EPOCH,
+                };
                 entries.push((entry.path(), modified, metadata.len()));
             }
         }
@@ -194,11 +196,15 @@ pub fn log_traffic_summary(direction: &str, body: &Value) {
 fn log_request_messages(body: &Value) {
     if let Some(msgs) = body.get("messages").and_then(|v| v.as_array()) {
         let count = msgs.len();
-        let last_role = msgs
+        let last_role = if let Some(r) = msgs
             .last()
             .and_then(|m| m.get("role"))
             .and_then(|r| r.as_str())
-            .unwrap_or("unknown");
+        {
+            r
+        } else {
+            "unknown"
+        };
 
         // Check for prefill (Assistant as last message)
         let is_prefill = last_role == "assistant";
@@ -221,8 +227,14 @@ fn log_tool_definitions(body: &Value) {
 
         // Check for 'strict' mode (The killer bug)
         let has_strict = tools.iter().any(|t| {
-            t.get("function")
-                .is_some_and(|f| f.get("strict").unwrap_or(&Value::Bool(false)) == true)
+            if let Some(f) = t.get("function") {
+                match f.get("strict") {
+                    Some(Value::Bool(b)) => *b,
+                    _ => false,
+                }
+            } else {
+                false
+            }
         });
         if has_strict {
             tracing::warn!("⚠️  WARNING: 'strict: true' detected! (Must strip for OpenRouter)");
@@ -233,10 +245,11 @@ fn log_tool_definitions(body: &Value) {
 pub fn log_response_choices(body: &Value) {
     if let Some(choices) = body.get("choices").and_then(|v| v.as_array()) {
         for (i, choice) in choices.iter().enumerate() {
-            let finish = choice
-                .get("finish_reason")
-                .and_then(|s| s.as_str())
-                .unwrap_or("NONE");
+            let finish = if let Some(s) = choice.get("finish_reason").and_then(|s| s.as_str()) {
+                s
+            } else {
+                "NONE"
+            };
             let msg = choice.get("message");
             let content = msg.and_then(|m| m.get("content"));
             let tools = msg
@@ -280,10 +293,10 @@ pub async fn capture_debug_snapshot(
     request_id: &str,
     payload: &Value,
 ) {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    let timestamp = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_millis(),
+        Err(_) => 0,
+    };
     let safe_model = model_id.replace("/", "_").replace(":", "_");
     let safe_cid = str_utils::prefix_chars(conversation_id, 8);
     let safe_rid = str_utils::prefix_chars(request_id, 8);

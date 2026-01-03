@@ -1,3 +1,4 @@
+use crate::constants::{DB_CLEANUP_RETENTION_DAYS, DB_PRAGMAS};
 use crate::types::{ParallaxError, Result};
 use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
@@ -37,7 +38,7 @@ pub async fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
     verify_schema_version(&pool).await;
 
     // Run cleanup
-    if let Err(e) = cleanup_old_data(&pool, 7).await {
+    if let Err(e) = cleanup_old_data(&pool, DB_CLEANUP_RETENTION_DAYS).await {
         tracing::warn!("Database cleanup failed: {}", e);
     }
 
@@ -46,13 +47,7 @@ pub async fn init_db<P: AsRef<Path>>(path: P) -> Result<DbPool> {
 
 async fn configure_db(pool: &DbPool) -> Result<()> {
     // Configure WAL mode and performance pragmas
-    let pragmas = [
-        "PRAGMA journal_mode = WAL",
-        "PRAGMA synchronous = NORMAL",
-        "PRAGMA busy_timeout = 5000",
-    ];
-
-    for pragma in pragmas {
+    for pragma in DB_PRAGMAS {
         if let Err(e) = sqlx::query(pragma).execute(pool).await {
             return Err(ParallaxError::Database(e).into());
         }

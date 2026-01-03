@@ -129,7 +129,10 @@ mod tests {
         agg.record_empty_args("openai", "gpt-4", "grep").await;
         agg.record_empty_args("openai", "gpt-4", "grep").await;
 
-        let metrics = agg.get_metrics("openai", "gpt-4").await.unwrap();
+        let metrics = match agg.get_metrics("openai", "gpt-4").await {
+            Some(m) => m,
+            None => panic!("Metrics should exist"),
+        };
         assert_eq!(metrics.empty_args_count, 2);
         assert_eq!(metrics.tools_with_empty_args.get("grep"), Some(&2));
     }
@@ -140,7 +143,10 @@ mod tests {
         agg.record_invalid_json("google", "gemini").await;
         agg.record_invalid_json("google", "gemini").await;
 
-        let metrics = agg.get_metrics("google", "gemini").await.unwrap();
+        let metrics = match agg.get_metrics("google", "gemini").await {
+            Some(m) => m,
+            None => panic!("Metrics should exist"),
+        };
         assert_eq!(metrics.invalid_json_count, 2);
     }
 

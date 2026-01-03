@@ -1,4 +1,8 @@
+#![allow(clippy::manual_unwrap_or_default)]
+#![allow(clippy::manual_unwrap_or)]
+
 pub mod agent_layer;
+pub mod constants;
 pub mod db;
 pub mod debug_utils;
 pub mod engine;
@@ -7,6 +11,7 @@ pub mod health;
 pub mod history_pruning;
 pub mod ingress;
 pub mod json_repair;
+pub mod kernel;
 pub mod log_rotation;
 pub mod logging;
 pub mod main_helper;

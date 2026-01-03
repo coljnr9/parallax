@@ -11,11 +11,12 @@ pub enum RedactionLevel {
 
 impl Default for RedactionLevel {
     fn default() -> Self {
-        match std::env::var("REDACTION_LEVEL")
-            .unwrap_or_else(|_| "normal".to_string())
-            .to_lowercase()
-            .as_str()
-        {
+        let level_str = if let Ok(s) = std::env::var("REDACTION_LEVEL") {
+            s
+        } else {
+            "normal".to_string()
+        };
+        match level_str.to_lowercase().as_str() {
             "strict" => RedactionLevel::Strict,
             "minimal" => RedactionLevel::Minimal,
             _ => RedactionLevel::Normal,
@@ -54,15 +55,15 @@ pub fn redact_value(v: &mut Value, level: RedactionLevel) {
                     }
                     RedactionLevel::Normal => {
                         // Redact large data blobs
-                        if k_lower == "data"
-                            && val.is_string()
-                            && val.as_str().unwrap_or("").len() > 100
-                        {
+                        let val_len = if let Some(s) = val.as_str() {
+                            s.len()
+                        } else {
+                            0
+                        };
+
+                        if k_lower == "data" && val.is_string() && val_len > 100 {
                             *val = Value::String("[REDACTED-DATA]".to_string());
-                        } else if k_lower == "arguments"
-                            && val.is_string()
-                            && val.as_str().unwrap_or("").len() > 500
-                        {
+                        } else if k_lower == "arguments" && val.is_string() && val_len > 500 {
                             *val = Value::String("[REDACTED-LARGE-ARGS]".to_string());
                         } else {
                             redact_value(val, level);

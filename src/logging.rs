@@ -1,3 +1,4 @@
+#![allow(clippy::manual_unwrap_or)]
 use crate::ingress::RawTurn;
 use axum::{
     body::Body,
@@ -28,10 +29,10 @@ pub fn setup_panic_hook() {
             "Unknown panic payload"
         };
 
-        let location = panic_info
-            .location()
-            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-            .unwrap_or_else(|| "unknown location".to_string());
+        let location = match panic_info.location() {
+            Some(l) => format!("{}:{}:{}", l.file(), l.line(), l.column()),
+            None => "unknown location".to_string(),
+        };
 
         error!(
             target: "panic",
@@ -73,7 +74,10 @@ pub fn sanitize_response_body(body: &mut serde_json::Value) {
         };
 
         let tool_calls = message.get("tool_calls").and_then(|tc| tc.as_array());
-        let has_tool_calls: bool = tool_calls.map(|tc| !tc.is_empty()).unwrap_or_default();
+        let has_tool_calls: bool = match tool_calls {
+            Some(tc) => !tc.is_empty(),
+            None => false,
+        };
 
         if has_tool_calls {
             // Rule 1: Shut Up and Run
@@ -90,11 +94,10 @@ pub fn log_request_summary(payload: &serde_json::Value) {
             Some(role) => role,
             None => "NONE".into(),
         };
-        let is_prefill: bool = raw_turn
-            .messages
-            .last()
-            .map(|m| m.role == Some(crate::types::Role::Assistant))
-            .unwrap_or_default();
+        let is_prefill: bool = match raw_turn.messages.last() {
+            Some(m) => m.role == Some(crate::types::Role::Assistant),
+            None => false,
+        };
 
         info!(
             target: "flight_recorder",
@@ -107,10 +110,12 @@ pub fn log_request_summary(payload: &serde_json::Value) {
 pub fn log_response_summary(response_body: &serde_json::Value) {
     let choices = response_body.get("choices").and_then(|c| c.as_array());
     if let Some(first_choice) = choices.and_then(|c| c.first()) {
-        let finish_reason = first_choice
-            .get("finish_reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("UNKNOWN");
+        let finish_reason =
+            if let Some(v) = first_choice.get("finish_reason").and_then(|v| v.as_str()) {
+                v
+            } else {
+                "UNKNOWN"
+            };
         let tool_calls = first_choice
             .get("message")
             .and_then(|m| m.get("tool_calls"))
@@ -200,8 +205,9 @@ impl StreamMetric {
 }
 
 pub fn get_turn_id() -> String {
-    match Span::current().field("turn_id").map(|v| v.to_string()) {
-        Some(id) => id,
-        None => "unknown".to_string(),
+    if let Some(id) = Span::current().field("turn_id").map(|v| v.to_string()) {
+        id
+    } else {
+        "unknown".to_string()
     }
 }

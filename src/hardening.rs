@@ -1,6 +1,7 @@
-use serde_json::{Map, Value};
-
+use crate::constants::{DIFF_MARKERS, FORBIDDEN_PLAN_TERMS};
 use crate::types::{ParallaxError, Result};
+use axum::http as ax_http;
+use serde_json::{Map, Value};
 use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -97,7 +98,10 @@ impl CircuitBreaker {
 
     pub async fn check(&self) -> Result<()> {
         let mut state = self.state.write().await;
+        self.check_locked(&mut state).await
+    }
 
+    pub async fn check_locked(&self, state: &mut CircuitState) -> Result<()> {
         if *state == CircuitState::Open {
             let last_failure = match self.last_failure_time.try_read() {
                 Ok(last) => last,
@@ -122,12 +126,16 @@ impl CircuitBreaker {
             }
 
             return Err(ParallaxError::Upstream(
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                ax_http::StatusCode::SERVICE_UNAVAILABLE,
                 "Circuit breaker is OPEN".to_string(),
             )
             .into());
         }
         Ok(())
+    }
+
+    pub async fn state_raw_lock(&self) -> tokio::sync::RwLockReadGuard<'_, CircuitState> {
+        self.state.read().await
     }
 
     pub async fn record_success(&self) {
@@ -194,16 +202,7 @@ fn sanitize_plan_args(args: &mut Value) {
 
         // Clean up any forbidden terms that might cause execution failures
         if let Some(Value::String(plan)) = map.get_mut("plan") {
-            // Remove or replace terms that could trigger "Severity 1" violations
-            let forbidden_terms = [
-                ("npm install", "package manager install"),
-                ("npm build", "package manager build"),
-                ("cargo build", "rust build"),
-                ("cargo check", "rust check"),
-                ("grep ", "ripgrep "),
-            ];
-
-            for (forbidden, replacement) in &forbidden_terms {
+            for (forbidden, replacement) in FORBIDDEN_PLAN_TERMS {
                 if plan.contains(forbidden) {
                     *plan = plan.replace(forbidden, replacement);
                 }
@@ -237,18 +236,9 @@ pub fn is_diff_like(text: &str) -> bool {
     }
 
     // Heuristic: Check for common unified diff markers at the start of lines
-    let markers = [
-        "diff --git ",
-        "--- ",
-        "+++ ",
-        "@@ -",
-        "Index: ",
-        "Property changes on: ",
-    ];
-
     for line in text.lines() {
         let trimmed = line.trim_start();
-        for marker in &markers {
+        for marker in DIFF_MARKERS {
             if trimmed.starts_with(marker) {
                 return true;
             }
@@ -425,8 +415,14 @@ mod tests {
                 Some(s) => s,
                 None => panic!("'plan' is not a string"),
             };
-            assert!(!plan.contains("npm install"), "Should not contain 'npm install'");
-            assert!(!plan.contains("cargo build"), "Should not contain 'cargo build'");
+            assert!(
+                !plan.contains("npm install"),
+                "Should not contain 'npm install'"
+            );
+            assert!(
+                !plan.contains("cargo build"),
+                "Should not contain 'cargo build'"
+            );
             // Check that grep was replaced with ripgrep (not just removed)
             assert!(
                 plan.contains("ripgrep "),

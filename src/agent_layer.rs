@@ -41,11 +41,10 @@ where
             }
         }
 
-        let trace_id = span_list
-            .first()
-            .and_then(|s| s.get("id"))
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "none".to_string());
+        let trace_id = match span_list.first().and_then(|s| s.get("id")) {
+            Some(id) => id.to_string(),
+            None => "none".to_string(),
+        };
 
         let output = json!({
             "timestamp": timestamp,

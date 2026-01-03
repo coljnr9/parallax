@@ -271,7 +271,11 @@ mod tests {
     fn test_parse_json_with_repair_empty() {
         let result = parse_json_with_repair("");
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), serde_json::json!({}));
+        let val = match result {
+            Ok(v) => v,
+            Err(e) => panic!("Repair failed: {}", e),
+        };
+        assert_eq!(val, serde_json::json!({}));
     }
 
     #[test]
@@ -279,11 +283,21 @@ mod tests {
         let result = repair_tool_call_arguments("create_plan", "This is a plan without JSON");
         assert!(result.is_ok());
 
-        let value = result.unwrap();
-        let obj = value.as_object().unwrap();
+        let value = match result {
+            Ok(v) => v,
+            Err(e) => panic!("Repair failed: {}", e),
+        };
+        let obj = match value.as_object() {
+            Some(o) => o,
+            None => panic!("Value should be an object"),
+        };
         assert!(obj.contains_key("plan"));
         assert!(obj.contains_key("name"));
-        assert_eq!(obj["plan"].as_str().unwrap(), "This is a plan without JSON");
+        let plan_text = match obj["plan"].as_str() {
+            Some(s) => s,
+            None => panic!("Plan should be a string"),
+        };
+        assert_eq!(plan_text, "This is a plan without JSON");
     }
 
     #[test]
@@ -291,16 +305,25 @@ mod tests {
         let result = repair_tool_call_arguments("create_plan", "");
         assert!(result.is_ok(), "Repair should succeed for empty arguments");
 
-        let value = result.unwrap();
+        let value = match result {
+            Ok(v) => v,
+            Err(e) => panic!("Repair failed: {}", e),
+        };
         println!("Empty args result: {:?}", value);
-        let obj = value.as_object().expect("Result should be an object");
+        let obj = match value.as_object() {
+            Some(o) => o,
+            None => panic!("Result should be an object"),
+        };
         assert!(
             obj.contains_key("plan"),
             "Should contain 'plan' key, got: {:?}",
             obj.keys().collect::<Vec<_>>()
         );
         assert!(obj.contains_key("name"), "Should contain 'name' key");
-        let plan_content = obj["plan"].as_str().unwrap();
+        let plan_content = match obj["plan"].as_str() {
+            Some(s) => s,
+            None => panic!("Plan should be a string"),
+        };
         assert!(
             plan_content.contains("No plan provided")
                 || plan_content.contains("Implementation Plan"),
@@ -314,12 +337,22 @@ mod tests {
         let result = repair_tool_call_arguments("create_plan", r#"{"plan": "Partial plan"#);
         assert!(result.is_ok());
 
-        let value = result.unwrap();
-        let obj = value.as_object().unwrap();
+        let value = match result {
+            Ok(v) => v,
+            Err(e) => panic!("Repair failed: {}", e),
+        };
+        let obj = match value.as_object() {
+            Some(o) => o,
+            None => panic!("Value should be an object"),
+        };
         assert!(obj.contains_key("plan"), "Should contain 'plan' key");
         // The repair should handle partial JSON gracefully
         if obj.contains_key("name") {
-            assert_eq!(obj["name"].as_str().unwrap(), "Implementation Plan");
+            let name = match obj["name"].as_str() {
+                Some(s) => s,
+                None => panic!("Name should be a string"),
+            };
+            assert_eq!(name, "Implementation Plan");
         }
     }
 
@@ -328,7 +361,10 @@ mod tests {
         let result = repair_tool_call_arguments("grep", r#"{"pattern": "test""#);
         assert!(result.is_ok());
 
-        let value = result.unwrap();
+        let value = match result {
+            Ok(v) => v,
+            Err(e) => panic!("Repair failed: {}", e),
+        };
         assert!(value.is_object());
     }
 
@@ -337,13 +373,24 @@ mod tests {
         let result = repair_create_plan_arguments("This is just plain text plan");
         assert!(result.is_ok());
 
-        let value = result.unwrap();
-        let obj = value.as_object().unwrap();
-        assert_eq!(
-            obj["plan"].as_str().unwrap(),
-            "This is just plain text plan"
-        );
-        assert_eq!(obj["name"].as_str().unwrap(), "Implementation Plan");
+        let value = match result {
+            Ok(v) => v,
+            Err(e) => panic!("Repair failed: {}", e),
+        };
+        let obj = match value.as_object() {
+            Some(o) => o,
+            None => panic!("Value should be an object"),
+        };
+        let plan = match obj["plan"].as_str() {
+            Some(s) => s,
+            None => panic!("Plan should be a string"),
+        };
+        assert_eq!(plan, "This is just plain text plan");
+        let name = match obj["name"].as_str() {
+            Some(s) => s,
+            None => panic!("Name should be a string"),
+        };
+        assert_eq!(name, "Implementation Plan");
     }
 
     #[test]
@@ -351,10 +398,24 @@ mod tests {
         let result = repair_create_plan_arguments(r#"{"plan": "JSON plan content"}"#);
         assert!(result.is_ok());
 
-        let value = result.unwrap();
-        let obj = value.as_object().unwrap();
-        assert_eq!(obj["plan"].as_str().unwrap(), "JSON plan content");
-        assert_eq!(obj["name"].as_str().unwrap(), "Implementation Plan");
+        let value = match result {
+            Ok(v) => v,
+            Err(e) => panic!("Repair failed: {}", e),
+        };
+        let obj = match value.as_object() {
+            Some(o) => o,
+            None => panic!("Value should be an object"),
+        };
+        let plan = match obj["plan"].as_str() {
+            Some(s) => s,
+            None => panic!("Plan should be a string"),
+        };
+        assert_eq!(plan, "JSON plan content");
+        let name = match obj["name"].as_str() {
+            Some(s) => s,
+            None => panic!("Name should be a string"),
+        };
+        assert_eq!(name, "Implementation Plan");
     }
 
     #[test]
@@ -364,10 +425,28 @@ mod tests {
         let result = repair_create_plan_arguments(input);
         assert!(result.is_ok());
 
-        let value = result.unwrap();
-        let obj = value.as_object().unwrap();
-        assert_eq!(obj["plan"].as_str().unwrap(), "Complete plan");
-        assert_eq!(obj["name"].as_str().unwrap(), "Custom Plan");
-        assert_eq!(obj["overview"].as_str().unwrap(), "Test overview");
+        let value = match result {
+            Ok(v) => v,
+            Err(e) => panic!("Repair failed: {}", e),
+        };
+        let obj = match value.as_object() {
+            Some(o) => o,
+            None => panic!("Value should be an object"),
+        };
+        let plan = match obj["plan"].as_str() {
+            Some(s) => s,
+            None => panic!("Plan should be a string"),
+        };
+        assert_eq!(plan, "Complete plan");
+        let name = match obj["name"].as_str() {
+            Some(s) => s,
+            None => panic!("Name should be a string"),
+        };
+        assert_eq!(name, "Custom Plan");
+        let overview = match obj["overview"].as_str() {
+            Some(s) => s,
+            None => panic!("Overview should be a string"),
+        };
+        assert_eq!(overview, "Test overview");
     }
 }

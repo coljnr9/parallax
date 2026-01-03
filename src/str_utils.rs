@@ -40,4 +40,3 @@ pub fn slice_bytes_safe(s: &str, start: usize, end: usize) -> Option<&str> {
         None
     }
 }
-

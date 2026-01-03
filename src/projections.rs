@@ -127,16 +127,14 @@ impl OpenRouterAdapter {
             .get("tool_choice")
             .map(Self::project_tool_choice);
 
-        let stream = context
-            .extra_body
-            .get("stream")
-            .and_then(|v| v.as_bool())
-            .or(Some(true));
-
         OpenAiRequest {
             model: model_id.to_string(),
             messages,
-            stream,
+            stream: context
+                .extra_body
+                .get("stream")
+                .and_then(|v| v.as_bool())
+                .or(Some(true)),
             temperature: context
                 .extra_body
                 .get("temperature")
@@ -563,7 +561,10 @@ impl OpenRouterAdapter {
             .map(|v| v as u32);
         if is_thinking {
             // Force at least 64k tokens for thinking models to prevent cutoffs
-            let max_tokens_val = max_tokens.unwrap_or_default();
+            let max_tokens_val = match max_tokens {
+                Some(v) => v,
+                None => 0,
+            };
             if max_tokens_val < 64000 {
                 max_tokens = Some(64000);
             }

@@ -452,8 +452,14 @@ impl StreamHandler {
                 None
             }
             crate::types::LineEvent::Error(err) => {
-                state.health.record_failure();
-                state.circuit_breaker.record_failure().await;
+                let _ = state
+                    .tx_kernel
+                    .send(crate::kernel::KernelCommand::UpdateHealth { success: false })
+                    .await;
+                let _ = state
+                    .tx_kernel
+                    .send(crate::kernel::KernelCommand::RecordCircuitFailure)
+                    .await;
                 Self::handle_provider_error(
                     data,
                     &err,
@@ -487,7 +493,10 @@ impl StreamHandler {
         _request_id: String,
         tx_tui: tokio::sync::broadcast::Sender<crate::tui::TuiEvent>,
     ) {
-        let err_str = serde_json::to_string(err).unwrap_or_default();
+        let err_str = match serde_json::to_string(err) {
+            Ok(s) => s,
+            Err(_) => String::new(),
+        };
         tracing::error!("[☁️  -> ⚙️ ] Stream Error: {}", err_str);
 
         // Classification & Retry Logic
@@ -783,11 +792,17 @@ impl StreamHandler {
         for choice in &pulse.choices {
             let tool_call_desc = match choice.delta.tool_calls.as_ref() {
                 Some(tcs) => tcs.iter().find_map(|tc| {
-                    tc.function.as_ref().map(|f| format!(
-                        "{}({})",
-                        f.name.as_deref().unwrap_or_default(),
-                        f.arguments.as_deref().unwrap_or_default()
-                    ))
+                    tc.function.as_ref().map(|f| {
+                        let name = match f.name.as_deref() {
+                            Some(s) => s,
+                            None => "",
+                        };
+                        let args = match f.arguments.as_deref() {
+                            Some(s) => s,
+                            None => "",
+                        };
+                        format!("{}({})", name, args)
+                    })
                 }),
                 None => None,
             };
@@ -1030,7 +1045,10 @@ impl StreamHandler {
                     Some(f) => f.name.clone(),
                     None => None,
                 },
-                arguments_delta: td.function.as_ref().and_then(|f| f.arguments.clone()).unwrap_or_default(),
+                arguments_delta: match td.function.as_ref().and_then(|f| f.arguments.clone()) {
+                    Some(s) => s,
+                    None => String::new(),
+                },
                 metadata: Some(serde_json::Value::Object(td.extra.clone())),
             });
         }
@@ -1152,12 +1170,15 @@ impl StreamHandler {
 
         let usage_str = match usage {
             Some(u) => {
-                let cache_str = u
+                let cache_str = match u
                     .prompt_tokens_details
                     .as_ref()
                     .and_then(|d| d.cached_tokens)
                     .map(|c| format!(" ({} cached)", c))
-                    .unwrap_or_default();
+                {
+                    Some(s) => s,
+                    None => String::new(),
+                };
                 format!(
                     "Prompt: {}{}, Completion: {}, Total: {}",
                     u.prompt_tokens, cache_str, u.completion_tokens, u.total_tokens

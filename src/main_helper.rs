@@ -1,3 +1,5 @@
+#![allow(clippy::manual_unwrap_or_default)]
+#![allow(clippy::manual_unwrap_or)]
 use crate::db::DbPool;
 use crate::tui::TuiEvent;
 use crate::types::*;
@@ -41,7 +43,8 @@ pub struct AppState {
     pub pricing: Arc<std::collections::HashMap<String, CostModel>>,
     pub disable_rescue: bool,
     pub args: Arc<Args>,
-    pub health: Arc<UpstreamHealth>,
+    pub tx_kernel: tokio::sync::mpsc::Sender<crate::kernel::KernelCommand>,
+    pub health: Arc<crate::types::UpstreamHealth>,
     pub circuit_breaker: Arc<crate::hardening::CircuitBreaker>,
 }
 
@@ -66,9 +69,14 @@ pub fn calculate_cost(
         }
     };
 
-    let cached_tokens = match usage.prompt_tokens_details.as_ref() {
-        Some(details) => details.cached_tokens.unwrap_or_default(),
-        None => 0,
+    let cached_tokens = if let Some(c) = usage
+        .prompt_tokens_details
+        .as_ref()
+        .and_then(|details| details.cached_tokens)
+    {
+        c
+    } else {
+        0
     };
     let uncached_prompt_tokens = usage.prompt_tokens.saturating_sub(cached_tokens);
 

@@ -239,7 +239,10 @@ fn summarize_turn(turn: &TurnRecord) -> Option<TurnRecord> {
                 summary_parts.push(MessagePart::Text {
                     content: format!(
                         "[Tool result: {}]",
-                        name.as_ref().unwrap_or(&"unknown".to_string())
+                        match name.as_ref() {
+                            Some(n) => n,
+                            None => "unknown",
+                        }
                     ),
                     cache_control: None,
                 });

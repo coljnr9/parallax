@@ -7,8 +7,10 @@ use tracing_subscriber::registry::LookupSpan;
 
 lazy_static! {
     static ref REDACTION_REGEX: Regex =
-        Regex::new(r"(?i)(sk-[A-Za-z0-9]{20,}|Bearer\s+[^\s]+|x-api-key:\s*[^\s]+)")
-            .expect("Invalid redaction regex");
+        match Regex::new(r"(?i)(sk-[A-Za-z0-9]{20,}|Bearer\s+[^\s]+|x-api-key:\s*[^\s]+)") {
+            Ok(r) => r,
+            Err(e) => panic!("Invalid redaction regex: {}", e),
+        };
 }
 
 pub struct RedactingWriter<W: Write> {

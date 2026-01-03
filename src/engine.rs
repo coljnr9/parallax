@@ -100,10 +100,17 @@ impl ParallaxEngine {
         // Pass 2: Coalesce sequential records
         let history = Self::coalesce_history(raw_records);
 
+        // Preserve ingress `stream` preference (Cursor/OpenAI clients may send stream=false)
+        // by copying it into the extra body that gets projected upstream.
+        let mut extra_body = raw.extra;
+        if let serde_json::Value::Object(map) = &mut extra_body {
+            map.insert("stream".to_string(), serde_json::Value::Bool(raw.stream));
+        }
+
         let context = ConversationContext {
             history,
             conversation_id: anchor_hash,
-            extra_body: raw.extra,
+            extra_body,
         };
 
         Self::route_model(raw.model, context, request_id)
@@ -409,7 +416,10 @@ impl ParallaxEngine {
                 "[⚙️  -> ⚙️ ] Sticky Signature Saved for {}: {} bytes ({} reasoning tokens)",
                 tool_id,
                 sig_json.len(),
-                reasoning_tokens.unwrap_or(0)
+                match reasoning_tokens {
+                    Some(t) => t,
+                    None => 0,
+                }
             );
 
             sqlx::query("INSERT OR REPLACE INTO tool_signatures (id, conversation_id, signature, reasoning_tokens, thought_signature) VALUES (?1, ?2, ?3, ?4, ?5)")

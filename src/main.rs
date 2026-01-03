@@ -1,3 +1,5 @@
+#![allow(clippy::manual_unwrap_or_default)]
+#![allow(clippy::manual_unwrap_or)]
 use parallax::db::*;
 use parallax::engine::*;
 use parallax::log_rotation::{LogRotationConfig, LogRotationManager};
@@ -22,9 +24,11 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use axum::response::sse::KeepAlive;
 use clap::Parser;
 use futures_util::StreamExt;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::codec::{FramedRead, LinesCodec};
@@ -510,12 +514,14 @@ async fn process_turn(
                 degraded: false,
             });
 
-            let is_streaming: bool = outgoing_request.stream.unwrap_or(false);
-            let tools_were_advertised = outgoing_request
-                .tools
-                .as_ref()
-                .map(|t| !t.is_empty())
-                .unwrap_or(false);
+            let is_streaming = match outgoing_request.stream {
+                Some(s) => s,
+                None => false,
+            };
+            let tools_were_advertised = match outgoing_request.tools.as_ref() {
+                Some(t) => !t.is_empty(),
+                None => false,
+            };
 
             if is_streaming {
                 handle_upstream_response(
@@ -703,7 +709,13 @@ async fn handle_upstream_response(
         .await;
     });
 
-    Sse::new(ReceiverStream::new(rx)).into_response()
+    Sse::new(ReceiverStream::new(rx))
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text(": keepalive"),
+        )
+        .into_response()
 }
 
 #[tokio::main]
@@ -716,8 +728,10 @@ async fn main() {
     // Setup Custom Logger that pipes to TUI
     use tracing_subscriber::prelude::*;
 
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "parallax=debug,parallax::tui=off,parallax::streaming=off".into());
+    let filter = match tracing_subscriber::EnvFilter::try_from_default_env() {
+        Ok(f) => f,
+        Err(_) => "parallax=debug,parallax::tui=off,parallax::streaming=off".into(),
+    };
 
     // Setup file logging
     let file_appender = tracing_appender::rolling::daily(".", "parallax.log");
@@ -810,6 +824,7 @@ async fn main() {
         pricing: Arc::new(pricing),
         disable_rescue: args.disable_rescue,
         args: args.clone(),
+        tx_kernel: mpsc::channel(1).0, // Placeholder for now, check if needed
         health,
         circuit_breaker,
     });
