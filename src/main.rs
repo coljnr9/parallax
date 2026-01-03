@@ -460,6 +460,12 @@ async fn process_turn(
 
     recorder.record_stage("upstream_request", outgoing_request_json);
 
+    tracing::info!(
+        "[⚙️  -> ☁️ ] Sending upstream request [request_id: {}] to {}",
+        request_id,
+        OPENROUTER_CHAT_COMPLETIONS
+    );
+
     let result = execute_upstream_request(&state, &outgoing_request).await;
 
     match result {
@@ -571,6 +577,21 @@ async fn execute_upstream_request(
                         Ok(text) => text,
                         Err(_) => "Unknown error".to_string(),
                     };
+                    
+                    // Log detailed error information for debugging
+                    if status.as_u16() == 520 {
+                        tracing::error!(
+                            "[☁️  -> ⚙️ ] Upstream 520 error (provider web server error): {}",
+                            error_body
+                        );
+                    } else {
+                        tracing::warn!(
+                            "[☁️  -> ⚙️ ] Upstream HTTP {} error: {}",
+                            status.as_u16(),
+                            error_body
+                        );
+                    }
+                    
                     Err(ObservedError::from(ParallaxError::Upstream(
                         status, error_body,
                     )))

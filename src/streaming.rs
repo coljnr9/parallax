@@ -267,6 +267,10 @@ impl StreamHandler {
                 {
                     tracing::error!("[⚙️ ] Retry failed: {}", e);
                     let _ = tx.send(Err(e.inner)).await;
+                    // CRITICAL FIX: Send [DONE] even when retry fails
+                    let _ = tx
+                        .send(Ok(axum::response::sse::Event::default().data("[DONE]")))
+                        .await;
                 }
                 return;
             } else {
@@ -310,6 +314,10 @@ impl StreamHandler {
                 {
                     tracing::error!("[⚙️ ] Fallback failed: {}", e);
                     let _ = tx.send(Err(e.inner)).await;
+                    // CRITICAL FIX: Send [DONE] even when fallback fails
+                    let _ = tx
+                        .send(Ok(axum::response::sse::Event::default().data("[DONE]")))
+                        .await;
                 }
                 return;
             }
@@ -324,6 +332,11 @@ impl StreamHandler {
                     error_msg,
                 )))
                 .await;
+            // CRITICAL FIX: Send [DONE] after error
+            let _ = tx
+                .send(Ok(axum::response::sse::Event::default().data("[DONE]")))
+                .await;
+            return;
         }
 
         Self::finalize_and_log_turn(
@@ -479,7 +492,11 @@ impl StreamHandler {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    fn detect_520_error(err: &crate::types::ProviderError) -> bool {
+        err.error.code == Some(520)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
     async fn handle_provider_error(
         data: &str,
         err: &crate::types::ProviderError,
@@ -488,7 +505,7 @@ impl StreamHandler {
         state: std::sync::Arc<AppState>,
         conversation_id: String,
         model_id: String,
-        _request_id: String,
+        request_id: String,
         tx_tui: tokio::sync::broadcast::Sender<crate::tui::TuiEvent>,
     ) {
         let err_str = if let Ok(s) = serde_json::to_string(err) {
@@ -496,7 +513,17 @@ impl StreamHandler {
         } else {
             String::new()
         };
-        tracing::error!("[☁️  -> ⚙️ ] Stream Error: {}", err_str);
+        
+        // Detect 520 errors specifically
+        if Self::detect_520_error(err) {
+            tracing::error!(
+                "[☁️  -> ⚙️ ] Stream Error 520 (Provider Web Server Error) [request_id: {}]: {}",
+                request_id,
+                err_str
+            );
+        } else {
+            tracing::error!("[☁️  -> ⚙️ ] Stream Error: {}", err_str);
+        }
 
         // Classification & Retry Logic
         let is_retryable = Self::is_retryable_error(err);
