@@ -456,14 +456,43 @@ pub enum Role {
     Model,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ConversationIdSource {
+    #[serde(rename = "cursor_header")]
+    CursorHeader,
+    #[serde(rename = "cursor_metadata")]
+    CursorMetadata,
+    #[serde(rename = "anchor_hash")]
+    AnchorHash,
+    #[serde(rename = "unknown")]
+    Unknown,
+}
+
+impl fmt::Display for ConversationIdSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CursorHeader => write!(f, "header"),
+            Self::CursorMetadata => write!(f, "metadata"),
+            Self::AnchorHash => write!(f, "hash"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
 /// --- THE RICH HUB (Internal Representation) ---
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationContext {
     pub history: Vec<TurnRecord>,
     pub conversation_id: String,
+    #[serde(default = "default_cid_source")]
+    pub conversation_id_source: ConversationIdSource,
     #[serde(default)]
     pub extra_body: serde_json::Value,
+}
+
+fn default_cid_source() -> ConversationIdSource {
+    ConversationIdSource::Unknown
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -70,7 +70,7 @@ pub struct RawTurn {
     pub extra: serde_json::Value,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct RawTurnRecord {
     pub role: Option<Role>,
     #[serde(rename = "type")]
@@ -142,7 +142,7 @@ impl RawTurnRecord {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum RawContent {
     String(String),
@@ -150,7 +150,7 @@ pub enum RawContent {
     Null,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum RawContentPart {
     #[serde(rename = "text")]
@@ -180,7 +180,7 @@ pub enum RawContentPart {
     Unknown,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct RawImageSource {
     #[serde(rename = "type")]
     pub type_: String,
@@ -188,12 +188,12 @@ pub struct RawImageSource {
     pub data: String,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct RawImageUrl {
     pub url: String,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct RawToolCall {
     pub id: String,
     pub function: RawFunction,
@@ -201,7 +201,7 @@ pub struct RawToolCall {
     pub extra: serde_json::Value,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct RawFunction {
     pub name: String,
     pub arguments: String,
@@ -320,7 +320,7 @@ impl RawTurn {
         }
     }
 
-    pub fn extract_conversation_id(&self) -> Result<String> {
+    pub fn extract_conversation_id(&self) -> Result<(String, ConversationIdSource)> {
         // Prefer Cursor's conversation ID if available - this is the authoritative source
         if let Some(meta) = &self.metadata {
             if let Some(cursor_cid) = &meta.conversation_id {
@@ -328,7 +328,7 @@ impl RawTurn {
                     "[⚙️  -> ⚙️ ] Identify: Cursor CID [{}...]",
                     str_utils::prefix_chars(cursor_cid, 8)
                 );
-                return Ok(cursor_cid.clone());
+                return Ok((cursor_cid.clone(), ConversationIdSource::CursorMetadata));
             }
         }
 
@@ -336,6 +336,6 @@ impl RawTurn {
         tracing::warn!(
             "[⚙️  -> ⚙️ ] No cursorConversationId in metadata, falling back to anchor hash"
         );
-        self.generate_anchor_hash()
+        Ok((self.generate_anchor_hash()?, ConversationIdSource::AnchorHash))
     }
 }

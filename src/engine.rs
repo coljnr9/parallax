@@ -92,38 +92,55 @@ impl ParallaxEngine {
         db: &DbPool,
         header_conversation_id: Option<String>,
     ) -> Result<TurnOperationEntry> {
-        let raw: RawTurn = serde_json::from_value(payload)
+        let RawTurn {
+            model,
+            messages,
+            stream,
+            user,
+            metadata,
+            extra,
+        } = serde_json::from_value(payload)
             .map_err(|e| ParallaxError::InvalidIngress(e.to_string()))?;
 
+        let raw = RawTurn {
+            model: model.clone(),
+            messages: messages.clone(),
+            stream,
+            user,
+            metadata,
+            extra: extra.clone(),
+        };
+
         // Prefer header conversation ID (from Cursor), then metadata, then fallback to hash
-        let anchor_hash = match header_conversation_id {
+        let (anchor_hash, cid_source) = match header_conversation_id {
             Some(cid) => {
                 tracing::info!(
                     "[⚙️  -> ⚙️ ] Using header-provided conversation ID: [{}...]",
                     crate::str_utils::prefix_chars(&cid, 8)
                 );
-                cid
+                (cid, ConversationIdSource::CursorHeader)
             }
             None => raw.extract_conversation_id()?,
         };
         let request_id = raw.extract_request_id();
 
         // Pass 1: Build records and infer roles
-        let raw_records = Self::process_raw_records(raw.messages, &anchor_hash, db).await?;
+        let raw_records = Self::process_raw_records(messages, &anchor_hash, db).await?;
 
         // Pass 2: Coalesce sequential records
         let history = Self::coalesce_history(raw_records);
 
         // Preserve ingress `stream` preference (Cursor/OpenAI clients may send stream=false)
         // by copying it into the extra body that gets projected upstream.
-        let mut extra_body = raw.extra;
+        let mut extra_body = extra;
         if let serde_json::Value::Object(map) = &mut extra_body {
-            map.insert("stream".to_string(), serde_json::Value::Bool(raw.stream));
+            map.insert("stream".to_string(), serde_json::Value::Bool(stream));
         }
 
         let context = ConversationContext {
             history,
             conversation_id: anchor_hash,
+            conversation_id_source: cid_source,
             extra_body,
         };
 
@@ -474,6 +491,7 @@ impl ParallaxEngine {
         Ok(ConversationContext {
             history: Vec::new(),
             conversation_id: conversation_id.to_string(),
+            conversation_id_source: ConversationIdSource::Unknown,
             extra_body: serde_json::json!({}),
         })
     }

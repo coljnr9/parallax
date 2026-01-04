@@ -110,6 +110,7 @@ impl StreamHandler {
             span_summary,
             user_query: None, // Will be preserved from initial write via merge
             role: Some("Assistant".to_string()),
+            conversation_id_source: ConversationIdSource::Unknown, // Source preserved in merge
             user_query_tags: None, // Will be preserved from initial write via merge
         };
         let _ = bundle_manager
@@ -126,6 +127,7 @@ impl StreamHandler {
             ended_at_ms: detail.ended_at_ms,
             issues: crate::debug_bundle::BundleManager::sum_issues_public(&detail.issues),
             role: Some("Assistant".to_string()),
+            conversation_id_source: ConversationIdSource::Unknown,
         };
         let _ = bundle_manager
             .update_conversation_summary_only(conversation_id, summary_update)
@@ -832,6 +834,7 @@ impl StreamHandler {
         let retry_context = ConversationContext {
             history: Vec::new(),
             conversation_id: conversation_id.clone(),
+            conversation_id_source: ConversationIdSource::Unknown,
             extra_body: serde_json::json!({}),
         };
 
@@ -1067,6 +1070,7 @@ impl StreamHandler {
         let mut retry_context = ConversationContext {
             history: Vec::new(),
             conversation_id: conversation_id.to_string(),
+            conversation_id_source: ConversationIdSource::Unknown,
             extra_body: serde_json::json!({}),
         };
 

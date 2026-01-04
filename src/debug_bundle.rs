@@ -6,10 +6,16 @@ use std::path::{Path, PathBuf};
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConversationSummary {
     pub conversation_id: String,
+    #[serde(default = "default_cid_source")]
+    pub conversation_id_source: crate::types::ConversationIdSource,
     pub created_at_ms: u64,
     pub last_updated_ms: u64,
     pub turns: Vec<TurnSummary>,
     pub issues: IssueCounts,
+}
+
+fn default_cid_source() -> crate::types::ConversationIdSource {
+    crate::types::ConversationIdSource::Unknown
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -23,6 +29,8 @@ pub struct TurnSummary {
     pub issues: IssueCounts,
     #[serde(default)]
     pub role: Option<String>,
+    #[serde(default = "default_cid_source")]
+    pub conversation_id_source: crate::types::ConversationIdSource,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -59,6 +67,8 @@ pub struct TurnDetail {
     pub user_query: Option<String>,
     #[serde(default)]
     pub role: Option<String>,
+    #[serde(default = "default_cid_source")]
+    pub conversation_id_source: crate::types::ConversationIdSource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_query_tags: Option<Vec<crate::tag_extract::TagDelta>>,
     #[serde(default)]
@@ -494,6 +504,7 @@ impl BundleManager {
                 .unwrap_or(0);
             ConversationSummary {
                 conversation_id: cid.to_string(),
+                conversation_id_source: detail.conversation_id_source.clone(),
                 created_at_ms: now,
                 last_updated_ms: now,
                 turns: Vec::new(),
@@ -510,6 +521,7 @@ impl BundleManager {
             ended_at_ms: detail.ended_at_ms,
             issues: Self::sum_issues(&detail.issues),
             role: detail.role.clone(),
+            conversation_id_source: detail.conversation_id_source.clone(),
         };
 
         // Update or add turn
@@ -589,6 +601,7 @@ impl BundleManager {
                 .unwrap_or(0);
             ConversationSummary {
                 conversation_id: cid.to_string(),
+                conversation_id_source: turn_summary.conversation_id_source.clone(),
                 created_at_ms: now,
                 last_updated_ms: now,
                 turns: Vec::new(),

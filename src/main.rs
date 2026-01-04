@@ -289,12 +289,21 @@ async fn chat_completions_handler(
     span.record("model.target", &model_id);
 
     let cid = context.conversation_id.clone();
+    let cid_source = context.conversation_id_source.clone();
     let turn_id_uuid = uuid::Uuid::new_v4().to_string();
     let tid = turn_id_uuid.clone();
 
     // Phase 2: Initialize bundle
     let bundle_manager = crate::debug_bundle::BundleManager::new("debug_capture");
     let _ = bundle_manager.ensure_turn_dir(&cid, &tid).await;
+
+    tracing::info!(
+        "[⚙️  -> ⚙️ ] Turn Context: CID: [{}...] (Source: {}) TID: [{}...] RID: [{}...]",
+        crate::str_utils::prefix_chars(&cid, 8),
+        cid_source,
+        crate::str_utils::prefix_chars(&tid, 8),
+        crate::str_utils::prefix_chars(&rid, 8)
+    );
 
     // Always write ingress_raw blob so users can see their messages
     let _ = bundle_manager
@@ -409,6 +418,7 @@ async fn chat_completions_handler(
         span_summary: None,
         user_query: user_query_opt,
         role: Some("User".to_string()),
+        conversation_id_source: context.conversation_id_source.clone(),
         user_query_tags,
     };
 
