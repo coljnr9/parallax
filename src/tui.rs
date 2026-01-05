@@ -47,6 +47,11 @@ pub enum TuiEvent {
         usage: Usage,
         actual_cost: f64,
         potential_cost_no_cache: f64,
+        pricing: Option<CostModel>,
+        prompt_cost: f64,
+        completion_cost: f64,
+        cache_read_cost: f64,
+        request_cost: f64,
     },
     #[allow(dead_code)]
     ServerPulse {
@@ -74,7 +79,7 @@ pub enum ActiveTab {
     FlightDeck,
     StreamFocus,
     Console,
-    Graphs,
+    Summary,
 }
 
 #[allow(dead_code)]
@@ -96,6 +101,26 @@ struct RequestRecord {
     recorded_in_graphs: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ModelSessionStats {
+    pub total_requests: u64,
+    pub successful_requests: u64,
+    pub failed_requests: u64,
+    pub status_counts: HashMap<u16, u64>,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub cached_tokens: u64,
+    pub actual_cost: f64,
+    pub potential_cost_no_cache: f64,
+    pub prompt_cost: f64,
+    pub completion_cost: f64,
+    pub cache_read_cost: f64,
+    pub request_cost: f64,
+    pub total_latency_ms: u128,
+    pub pricing: Option<CostModel>,
+}
+
 pub struct AppState {
     active_tab: ActiveTab,
     requests: VecDeque<RequestRecord>,
@@ -108,6 +133,7 @@ pub struct AppState {
     session_cost: CostUsd,
     start_time: std::time::Instant,
     model_costs: HashMap<String, CostUsd>,
+    pub model_stats: HashMap<String, ModelSessionStats>,
     tick: u64,
     should_quit: bool,
     upstream_health: Option<UpstreamHealthDisplay>,
@@ -173,12 +199,21 @@ impl AppState {
             session_cost: CostUsd(0.0),
             start_time: std::time::Instant::now(),
             model_costs: HashMap::new(),
+            model_stats: HashMap::new(),
             tick: 0,
             should_quit: false,
             upstream_health: None,
             matrix_effect: MatrixEffect::new(80, 2), // Initial width and default level
             graph_state: GraphState::new(),
         }
+    }
+
+    fn reset_session_stats(&mut self) {
+        self.model_stats.clear();
+        self.session_cost = CostUsd(0.0);
+        self.model_costs.clear();
+        self.total_requests = 0;
+        self.start_time = std::time::Instant::now();
     }
 
     fn handle_event(&mut self, event: TuiEvent) {
@@ -229,12 +264,22 @@ impl AppState {
                 usage,
                 actual_cost,
                 potential_cost_no_cache,
+                pricing,
+                prompt_cost,
+                completion_cost,
+                cache_read_cost,
+                request_cost,
             } => self.handle_cost_update(
                 RequestId(id),
                 model,
                 usage,
                 CostUsd(actual_cost),
                 CostUsd(potential_cost_no_cache),
+                pricing,
+                prompt_cost,
+                completion_cost,
+                cache_read_cost,
+                request_cost,
             ),
             TuiEvent::ServerPulse {
                 uptime_secs,
@@ -268,6 +313,10 @@ impl AppState {
         model: String,
         intent: Option<Intent>,
     ) {
+        // Update session-level model stats
+        let stats = self.model_stats.entry(model.clone()).or_default();
+        stats.total_requests += 1;
+
         // If we already have a record for this CID, update it. Otherwise, create one.
         if let Some(req) = self.requests.iter_mut().find(|r| r.cid == cid) {
             req.id = id.clone(); // Update to the latest request ID
@@ -327,6 +376,16 @@ impl AppState {
         if let Some(req) = self.requests.iter_mut().find(|r| r.id == id) {
             req.status = Some(status);
             req.latency = Some(latency);
+
+            // Update session-level model stats
+            let stats = self.model_stats.entry(req.model.clone()).or_default();
+            stats.total_latency_ms += latency.0;
+            *stats.status_counts.entry(status).or_default() += 1;
+            if status == 200 {
+                stats.successful_requests += 1;
+            } else {
+                stats.failed_requests += 1;
+            }
         }
         if self.active_connections > 0 {
             self.active_connections -= 1;
@@ -354,14 +413,39 @@ impl AppState {
         usage: Usage,
         actual_cost: CostUsd,
         potential_cost_no_cache: CostUsd,
+        pricing: Option<CostModel>,
+        prompt_cost: f64,
+        completion_cost: f64,
+        cache_read_cost: f64,
+        request_cost: f64,
     ) {
         if let Some(req) = self.requests.iter_mut().find(|r| r.id == id) {
-            req.usage = Some(usage);
+            req.usage = Some(usage.clone());
             req.actual_cost = Some(actual_cost);
             req.potential_cost_no_cache = Some(potential_cost_no_cache);
         }
         self.session_cost.0 += actual_cost.0;
-        self.model_costs.entry(model).or_insert(CostUsd(0.0)).0 += actual_cost.0;
+        self.model_costs.entry(model.clone()).or_insert(CostUsd(0.0)).0 += actual_cost.0;
+
+        // Update session-level model stats
+        let stats = self.model_stats.entry(model).or_default();
+        stats.prompt_tokens += usage.prompt_tokens as u64;
+        stats.completion_tokens += usage.completion_tokens as u64;
+        stats.total_tokens += usage.total_tokens as u64;
+        if let Some(details) = usage.prompt_tokens_details {
+            if let Some(cached) = details.cached_tokens {
+                stats.cached_tokens += cached as u64;
+            }
+        }
+        stats.actual_cost += actual_cost.0;
+        stats.potential_cost_no_cache += potential_cost_no_cache.0;
+        stats.prompt_cost += prompt_cost;
+        stats.completion_cost += completion_cost;
+        stats.cache_read_cost += cache_read_cost;
+        stats.request_cost += request_cost;
+        if pricing.is_some() {
+            stats.pricing = pricing;
+        }
     }
 
     fn select_down(&mut self) {
@@ -498,7 +582,8 @@ impl App {
                             KeyCode::Char('1') => self.state.active_tab = ActiveTab::FlightDeck,
                             KeyCode::Char('2') => self.state.active_tab = ActiveTab::StreamFocus,
                             KeyCode::Char('3') => self.state.active_tab = ActiveTab::Console,
-                            KeyCode::Char('4') => self.state.active_tab = ActiveTab::Graphs,
+                            KeyCode::Char('4') => self.state.active_tab = ActiveTab::Summary,
+                            KeyCode::Char('X') => self.state.reset_session_stats(),
 
                             // Vim keybindings for grid navigation
                             KeyCode::Char('k') | KeyCode::Up => self.state.select_up(),
@@ -563,7 +648,7 @@ impl App {
             ActiveTab::FlightDeck => self.render_flight_deck(f, chunks[1]),
             ActiveTab::StreamFocus => self.render_stream_focus(f, chunks[1]),
             ActiveTab::Console => self.render_console(f, chunks[1]),
-            ActiveTab::Graphs => self.render_graphs(f, chunks[1]),
+            ActiveTab::Summary => self.render_session_summary(f, chunks[1]),
         }
 
         self.render_footer(f, chunks[2]);
@@ -678,7 +763,7 @@ impl App {
             Span::raw("  "),
             self.render_tab_item("[3] SYSTEM", "[3]", "LOGS", ActiveTab::Console, is_compact),
             Span::raw("  "),
-            self.render_tab_item("[4] GRAPHS", "[4]", "GRAPHS", ActiveTab::Graphs, is_compact),
+            self.render_tab_item("[4] SUMMARY", "[4]", "SUMM", ActiveTab::Summary, is_compact),
         ];
         f.render_widget(Paragraph::new(Line::from(tabs)), area);
     }
@@ -800,9 +885,9 @@ impl App {
     fn render_footer(&self, f: &mut Frame, area: Rect) {
         let is_compact = area.width < 85;
         let footer_text = if is_compact {
-            " [Q] Quit | [R] Rain | [1-4] Tabs | [Ent] Focus | [Esc] Back "
+            " [Q] Quit | [X] Reset | [1-4] Tabs | [Ent] Focus | [Esc] Back "
         } else {
-            " [Q] Quit application | [R] Cycle Rain | [1-4] Switch Tabs | [Enter] Focus Stream | [Esc] Back "
+            " [Q] Quit application | [X] Reset Stats | [1-4] Switch Tabs | [Enter] Focus Stream | [Esc] Back "
         };
         let footer = Paragraph::new(footer_text).block(
             Block::default()
@@ -1277,285 +1362,179 @@ impl App {
         f.render_widget(list, area);
     }
 
-    fn render_graphs(&self, f: &mut Frame, area: Rect) {
-        let is_compact = area.width < 85;
+    fn render_session_summary(&self, f: &mut Frame, area: Rect) {
+        let is_compact = area.width < 100;
 
-        // Layout: Top legend/table, then 3 chart areas
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(if is_compact { 3 } else { 4 }), // Legend/table
-                Constraint::Percentage(40),                         // TPS chart
-                Constraint::Percentage(30),                         // Tokens chart
-                Constraint::Percentage(30),                         // Cost chart
+                Constraint::Length(3), // Totals header
+                Constraint::Min(0),    // Model table
             ])
             .split(area);
 
-        // Render legend/table
-        self.render_graphs_legend(f, chunks[0]);
+        // 1. Totals Header
+        let mut total_reqs = 0;
+        let mut total_success = 0;
+        let mut total_fail = 0;
+        let mut total_prompt = 0;
+        let mut total_comp = 0;
+        let mut total_cached = 0;
+        let mut total_actual_cost = 0.0;
+        let mut total_potential_cost = 0.0;
+        let mut total_latency = 0;
 
-        // Render the three charts
-        self.render_tps_chart(f, chunks[1]);
-        self.render_tokens_chart(f, chunks[2]);
-        self.render_cost_chart(f, chunks[3]);
-    }
-
-    fn render_graphs_legend(&self, f: &mut Frame, area: Rect) {
-        let mut legend_items = Vec::new();
-
-        // Add header
-        if area.width > 60 {
-            legend_items.push(Row::new(vec![
-                Cell::from(Span::styled(
-                    "MODEL",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "TPS",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "TOKENS",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "COST",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-            ]));
+        for stats in self.state.model_stats.values() {
+            total_reqs += stats.total_requests;
+            total_success += stats.successful_requests;
+            total_fail += stats.failed_requests;
+            total_prompt += stats.prompt_tokens;
+            total_comp += stats.completion_tokens;
+            total_cached += stats.cached_tokens;
+            total_actual_cost += stats.actual_cost;
+            total_potential_cost += stats.potential_cost_no_cache;
+            total_latency += stats.total_latency_ms;
         }
 
-        // Add per-model data
-        let models: Vec<_> = self.state.graph_state.models.keys().collect();
-        for model in models {
-            let color = self.state.graph_state.get_model_color(model);
-            let model_data = &self.state.graph_state.models[model];
+        let system_tps = if total_latency > 0 {
+            total_comp as f64 / (total_latency as f64 / 1000.0)
+        } else {
+            0.0
+        };
 
-            let current_tps = match model_data.buckets.back() {
-                Some(b) => b.tps_completion,
-                None => 0.0,
+        let savings = (total_potential_cost - total_actual_cost).max(0.0);
+        let cache_efficiency = if (total_prompt + total_comp) > 0 {
+            (total_cached as f64 / (total_prompt + total_comp) as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let totals_text = if is_compact {
+            format!(
+                " TOTALS: {} reqs | {:.1} TPS | ${:.4} (saved ${:.4})\n TOKENS: {} prompt / {} comp | {} cached ({:.1}%)",
+                total_reqs, system_tps, total_actual_cost, savings,
+                total_prompt, total_comp, total_cached, cache_efficiency
+            )
+        } else {
+            format!(
+                " SYSTEM TOTALS: {} Requests ({} Success / {} Fail) | Avg TPS: {:.1} | Total Spend: ${:.4} (Cache Savings: ${:.4})\n TOKEN FLOW: {} Prompt / {} Completion | {} Cached Tokens (Effective Cache Rate: {:.1}%)",
+                total_reqs, total_success, total_fail, system_tps, total_actual_cost, savings,
+                total_prompt, total_comp, total_cached, cache_efficiency
+            )
+        };
+
+        let totals_block = Paragraph::new(totals_text)
+            .block(Block::default().borders(Borders::ALL).title(" SESSION TOTALS "))
+            .style(Style::default().fg(Color::Cyan));
+        f.render_widget(totals_block, chunks[0]);
+
+        // 2. Per-Model Table
+        let mut rows: Vec<(String, &ModelSessionStats)> = self.state.model_stats.iter()
+            .map(|(k, v)| (k.clone(), v))
+            .collect();
+        
+        // Sort by actual cost descending
+        rows.sort_by(|a, b| b.1.actual_cost.partial_cmp(&a.1.actual_cost).unwrap_or(std::cmp::Ordering::Equal));
+
+        let table_header = if is_compact {
+            Row::new(vec![
+                Cell::from("MODEL"),
+                Cell::from("REQS"),
+                Cell::from("TPS"),
+                Cell::from("COST"),
+                Cell::from("SAVED"),
+                Cell::from("CACHE"),
+            ]).style(Style::default().add_modifier(Modifier::BOLD))
+        } else {
+            Row::new(vec![
+                Cell::from("MODEL ID"),
+                Cell::from("REQS (S/F)"),
+                Cell::from("TPS"),
+                Cell::from("TOKENS (P/C)"),
+                Cell::from("CACHED"),
+                Cell::from("ACTUAL COST"),
+                Cell::from("SAVINGS"),
+                Cell::from("RATES (P/C/R)"),
+            ]).style(Style::default().add_modifier(Modifier::BOLD))
+        };
+
+        let table_rows: Vec<Row> = rows.iter().map(|(model_id, stats)| {
+            let model_tps = if stats.total_latency_ms > 0 {
+                stats.completion_tokens as f64 / (stats.total_latency_ms as f64 / 1000.0)
+            } else {
+                0.0
             };
 
-            let row = if area.width > 60 {
+            let model_savings = (stats.potential_cost_no_cache - stats.actual_cost).max(0.0);
+            let model_cache_rate = if (stats.prompt_tokens + stats.completion_tokens) > 0 {
+                (stats.cached_tokens as f64 / (stats.prompt_tokens + stats.completion_tokens) as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            let pricing_str = if let Some(p) = &stats.pricing {
+                format!("{:.1}/{:.1}/{:.1}", p.prompt * 1_000_000.0, p.completion * 1_000_000.0, p.prompt_cache_read * 1_000_000.0)
+            } else {
+                "N/A".to_string()
+            };
+
+            // Simplify model name for display
+            let display_name = model_id.split('/').last().unwrap_or(model_id);
+
+            if is_compact {
                 Row::new(vec![
-                    Cell::from(Span::styled(
-                        model,
-                        Style::default().fg(color).add_modifier(Modifier::BOLD),
-                    )),
-                    Cell::from(Span::raw(format!("{:.1}", current_tps))),
-                    Cell::from(Span::raw(model_data.current_total_tokens.to_string())),
-                    Cell::from(Span::raw(format!("${}", model_data.current_total_cost))),
+                    Cell::from(display_name.to_string()),
+                    Cell::from(stats.total_requests.to_string()),
+                    Cell::from(format!("{:.1}", model_tps)),
+                    Cell::from(format!("${:.3}", stats.actual_cost)),
+                    Cell::from(format!("${:.3}", model_savings)),
+                    Cell::from(format!("{:.0}%", model_cache_rate)),
                 ])
             } else {
                 Row::new(vec![
-                    Cell::from(Span::styled(
-                        model,
-                        Style::default().fg(color).add_modifier(Modifier::BOLD),
-                    )),
-                    Cell::from(Span::raw(format!("{:.1} TPS", current_tps))),
+                    Cell::from(display_name.to_string()),
+                    Cell::from(format!("{} ({}/{})", stats.total_requests, stats.successful_requests, stats.failed_requests)),
+                    Cell::from(format!("{:.1}", model_tps)),
+                    Cell::from(format!("{}/{}", stats.prompt_tokens, stats.completion_tokens)),
+                    Cell::from(format!("{} ({:.1}%)", stats.cached_tokens, model_cache_rate)),
+                    Cell::from(Span::styled(format!("${:.4}", stats.actual_cost), Style::default().fg(Color::Green))),
+                    Cell::from(Span::styled(format!("${:.4}", model_savings), Style::default().fg(Color::Yellow))),
+                    Cell::from(Span::styled(pricing_str, Style::default().fg(Color::DarkGray))),
                 ])
-            };
-            legend_items.push(row);
-        }
+            }
+        }).collect();
 
-        // Add totals row
-        let total_tps = self.state.graph_state.get_total_tps();
-        let total_tokens = self.state.graph_state.get_total_tokens();
-        let total_cost = self.state.graph_state.get_total_cost();
-
-        let totals_row = if area.width > 60 {
-            Row::new(vec![
-                Cell::from(Span::styled(
-                    "TOTAL",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    format!("{:.1}", total_tps),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    total_tokens.to_string(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    format!("${:.4}", total_cost),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-            ])
+        let table = if is_compact {
+            let widths = [
+                Constraint::Percentage(30),
+                Constraint::Percentage(10),
+                Constraint::Percentage(15),
+                Constraint::Percentage(15),
+                Constraint::Percentage(15),
+                Constraint::Percentage(15),
+            ];
+            Table::new(table_rows, widths)
         } else {
-            Row::new(vec![
-                Cell::from(Span::styled(
-                    "TOTAL",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    format!("{:.1} TPS", total_tps),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-            ])
-        };
-        legend_items.push(totals_row);
-
-        let widths = if area.width > 60 {
-            vec![
-                Constraint::Percentage(40),
+            let widths = [
                 Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-            ]
-        } else {
-            vec![Constraint::Percentage(60), Constraint::Percentage(40)]
+                Constraint::Percentage(15),
+                Constraint::Percentage(8),
+                Constraint::Percentage(15),
+                Constraint::Percentage(12),
+                Constraint::Percentage(10),
+                Constraint::Percentage(10),
+                Constraint::Percentage(10),
+            ];
+            Table::new(table_rows, widths)
         };
 
-        let table = Table::new(legend_items, widths)
-            .block(Block::default().borders(Borders::ALL).title(" LEGEND "));
+        let table = table
+            .header(table_header)
+            .block(Block::default().borders(Borders::ALL).title(" PER-MODEL SESSION SUMMARY "))
+            .column_spacing(1)
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
-        f.render_widget(table, area);
-    }
-
-    fn render_tps_chart(&self, f: &mut Frame, area: Rect) {
-        self.render_stacked_chart(
-            f,
-            area,
-            " COMPLETION TPS ",
-            |model_data| match model_data.buckets.back() {
-                Some(b) => b.tps_completion,
-                None => 0.0,
-            },
-            true, // show current value
-        );
-    }
-
-    fn render_tokens_chart(&self, f: &mut Frame, area: Rect) {
-        self.render_stacked_chart(
-            f,
-            area,
-            " COMPLETION TOKENS (5m window) ",
-            |model_data| model_data.current_total_tokens as f64,
-            false, // don't show current value for cumulative
-        );
-    }
-
-    fn render_cost_chart(&self, f: &mut Frame, area: Rect) {
-        self.render_stacked_chart(
-            f,
-            area,
-            " COST (5m window) ",
-            |model_data| model_data.current_total_cost,
-            false, // don't show current value for cumulative
-        );
-    }
-
-    fn render_stacked_chart<F>(
-        &self,
-        f: &mut Frame,
-        area: Rect,
-        title: &str,
-        get_value: F,
-        show_current: bool,
-    ) where
-        F: Fn(&ModelGraphData) -> f64,
-    {
-        let block = Block::default().borders(Borders::ALL).title(title);
-
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-
-        if self.state.graph_state.models.is_empty() {
-            let p = Paragraph::new("No data available")
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(Color::DarkGray));
-            f.render_widget(p, inner);
-            return;
-        }
-
-        // Calculate chart dimensions
-        let chart_width = inner.width.saturating_sub(2) as usize;
-        let chart_height = inner.height.saturating_sub(2) as usize;
-
-        if chart_width < 10 || chart_height < 3 {
-            let p = Paragraph::new("Chart area too small")
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(Color::DarkGray));
-            f.render_widget(p, inner);
-            return;
-        }
-
-        // Get current values for each model
-        let mut model_values: Vec<(String, f64, Color)> = self
-            .state
-            .graph_state
-            .models
-            .iter()
-            .map(|(model, data)| {
-                let value = get_value(data);
-                let color = self.state.graph_state.get_model_color(model);
-                (model.clone(), value, color)
-            })
-            .collect();
-
-        // Sort by value for better stacking (largest at bottom)
-        model_values.sort_by(|a, b| match b.1.partial_cmp(&a.1) {
-            Some(ord) => ord,
-            None => std::cmp::Ordering::Equal,
-        });
-
-        let total_value: f64 = model_values.iter().map(|(_, v, _)| v).sum();
-
-        if total_value <= 0.0 {
-            let p = Paragraph::new("No activity")
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(Color::DarkGray));
-            f.render_widget(p, inner);
-            return;
-        }
-
-        // Render the stacked bars
-        for (x_offset, (_model, value, color)) in model_values.iter().enumerate() {
-            if x_offset >= chart_width {
-                break;
-            }
-
-            let bar_height = ((value / total_value) * chart_height as f64).round() as usize;
-            if bar_height == 0 {
-                continue;
-            }
-
-            // Render vertical stack for this x position
-            for y in 0..bar_height {
-                let y_pos = inner.y + inner.height - 2 - y as u16; // Start from bottom
-                let x_pos = inner.x + 1 + x_offset as u16;
-
-                if y_pos > inner.y && y_pos < inner.y + inner.height - 1 {
-                    let cell = f.buffer_mut().get_mut(x_pos, y_pos);
-                    {
-                        cell.set_char('█').set_style(Style::default().fg(*color));
-                    }
-                }
-            }
-        }
-
-        // Add current total value on the right side
-        if show_current {
-            let total_text = format!("{:.1}", total_value);
-            let total_span = Span::styled(
-                &total_text,
-                Style::default()
-                    .add_modifier(Modifier::BOLD)
-                    .fg(Color::White),
-            );
-
-            let total_area = Rect {
-                x: inner.x + inner.width.saturating_sub(total_text.len() as u16 + 2),
-                y: inner.y,
-                width: total_text.len() as u16 + 2,
-                height: 1,
-            };
-
-            if total_area.width > 0 {
-                f.render_widget(Paragraph::new(total_span), total_area);
-            }
-        }
+        f.render_widget(table, chunks[1]);
     }
 
     fn render_size_warning(&self, f: &mut Frame, area: Rect) {
@@ -1967,11 +1946,11 @@ mod graph_tests {
         let mut graph_state = GraphState::new();
 
         // First model should get first color
-        graph_state.record_request_completion("model1", 100, LatencyMs(2000), CostUsd(0.01));
+        graph_state.record_request_completion("model1", 100, LatencyMs(2000), Color::White);
         let color1 = graph_state.get_model_color("model1");
 
         // Second model should get second color
-        graph_state.record_request_completion("model2", 100, LatencyMs(2000), CostUsd(0.01));
+        graph_state.record_request_completion("model2", 100, LatencyMs(2000), Color::White);
         let color2 = graph_state.get_model_color("model2");
 
         assert_ne!(color1, color2);

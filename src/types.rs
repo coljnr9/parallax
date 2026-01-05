@@ -841,6 +841,10 @@ pub struct ProviderErrorDetails {
     pub message: String,
     pub code: Option<u16>,
     pub metadata: Option<serde_json::Value>,
+
+    /// Catch-all for extra provider fields like `retryable`, `reason`, `provider: { status, body }`
+    #[serde(default, flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 pub fn parse_provider_line(data: &str) -> LineEvent {
@@ -850,6 +854,7 @@ pub fn parse_provider_line(data: &str) -> LineEvent {
                 message: format!("JSON chunk too large: {} bytes", data.len()),
                 code: Some(413),
                 metadata: None,
+                extra: serde_json::Map::new(),
             },
         });
     }

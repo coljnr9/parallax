@@ -51,6 +51,12 @@ pub struct AppState {
 pub struct CostBreakdown {
     pub actual_cost: f64,
     pub potential_cost_no_cache: f64,
+    pub prompt_cost: f64,
+    pub completion_cost: f64,
+    pub cache_read_cost: f64,
+    pub request_cost: f64,
+    pub cached_tokens: u32,
+    pub uncached_prompt_tokens: u32,
 }
 
 pub fn calculate_cost(
@@ -101,5 +107,11 @@ pub fn calculate_cost(
     Ok(CostBreakdown {
         actual_cost: total,
         potential_cost_no_cache: potential_total,
+        prompt_cost,
+        completion_cost,
+        cache_read_cost: cache_cost,
+        request_cost: price.request,
+        cached_tokens,
+        uncached_prompt_tokens,
     })
 }

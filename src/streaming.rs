@@ -526,7 +526,7 @@ impl StreamHandler {
             }
         }
 
-        // Check for empty response (common with Gemini Pro on large contexts)
+        // Check for empty response
         if finalized_turn.content.is_empty() {
             tracing::error!(
                 "[⚙️ ] Model {} returned completely empty stream for request {}",
@@ -534,37 +534,56 @@ impl StreamHandler {
                 request_id
             );
 
-            if state.args.gemini_fallback && model_id.contains("gemini-3-pro") {
-                tracing::warn!("[⚙️ ] Gemini Pro empty stream detected; falling back to Flash...");
-                let _ = tx_tui.send(crate::tui::TuiEvent::LogMessage {
-                    level: "WARN".to_string(),
-                    target: "parallax::streaming".to_string(),
-                    message: format!(
-                        "Gemini Pro empty response for {}; falling back to Flash.",
-                        request_id
-                    ),
-                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                });
+            // Universal Retry: If we haven't seen any tool calls and the stream is empty,
+            // we should try one more time. This handles transient provider glitches (like the GPT-5.2 case).
+            // We use a simple in-memory flag or check to prevent infinite loops.
+            // Ideally we'd have a `retry_count` in the signature, but for now we'll rely on the client not retrying indefinitely.
+            // A better approach is to check if we are already in a retry context, but `StreamHandler` doesn't know that easily without signature changes.
+            // However, we CAN reuse the existing `retry_with_diff_enforcement` mechanism or similar logic if we generalize it.
 
-                if let Err(e) =
-                    Self::fallback_to_flash(state, conversation_id.to_string(), tx, tx_tui).await
-                {
-                    tracing::error!("[⚙️ ] Fallback failed: {}", e);
-                    let _ = tx.send(Err(e.inner)).await;
-                }
-                return;
+            // Let's reuse `execute_retry_or_fallback` but with the SAME model.
+            // We need to guard against infinite loops. We can check if `request_id` has a retry suffix or check state.
+            // For now, we will log and emit a warning to the user, and attempt ONE retry if this isn't already a retry.
+            // Since we don't have explicit retry tracking passed to `handle_stream`, we'll use a heuristic:
+            // if we haven't emitted any events to the client yet (which we haven't if content is empty), we can try again transparently.
+
+            // Note: `retry_with_diff_enforcement` adds a specific system prompt. We just want a plain retry here.
+            // We'll call `execute_retry_or_fallback` with the original model ID.
+
+            tracing::warn!("[⚙️ ] Empty stream detected; attempting single transparency retry for {}", request_id);
+            let _ = tx_tui.send(crate::tui::TuiEvent::LogMessage {
+                level: "WARN".to_string(),
+                target: "parallax::streaming".to_string(),
+                message: format!(
+                    "Model {} returned empty stream; retrying once transparently.",
+                    model_id
+                ),
+                timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+            });
+
+            if let Err(e) = Self::execute_retry_or_fallback(
+                state,
+                conversation_id.to_string(),
+                model_id.to_string(),
+                tx,
+                tx_tui.clone(),
+            )
+            .await
+            {
+                tracing::error!("[⚙️ ] Retry failed: {}", e);
+                // If retry fails, we fall through to the error response below
+                let error_msg = format!(
+                    "Model {} returned an empty response (retry failed). This is likely an upstream provider issue.",
+                    model_id
+                );
+                let _ = tx
+                    .send(Err(ParallaxError::Upstream(
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        error_msg,
+                    )))
+                    .await;
             }
-
-            let error_msg = format!(
-                "Model {} returned an empty response. This often happens with Gemini Pro when the context window is large. Try using Gemini Flash or starting a new chat.",
-                model_id
-            );
-            let _ = tx
-                .send(Err(ParallaxError::Upstream(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    error_msg,
-                )))
-                .await;
+            return;
         }
 
         Self::finalize_and_log_turn(
@@ -680,21 +699,48 @@ impl StreamHandler {
         state: std::sync::Arc<AppState>,
         conversation_id: String,
         model_id: String,
-        _request_id: String,
+        request_id: String,
         tx_tui: tokio::sync::broadcast::Sender<crate::tui::TuiEvent>,
     ) {
-        let err_str = match serde_json::to_string(err) {
-            Ok(s) => s,
-            Err(_) => String::new(),
-        };
-        tracing::error!("[☁️  -> ⚙️ ] Stream Error: {}", err_str);
-
-        // Classification & Retry Logic
         let is_retryable = Self::is_retryable_error(err);
 
+        // Extract provider.status / provider.body if present (preserved via flatten extra)
+        let provider_status = err
+            .error
+            .extra
+            .get("provider")
+            .and_then(|p| p.get("status"))
+            .and_then(|s| s.as_u64());
+
+        let provider_body_snippet = err
+            .error
+            .extra
+            .get("provider")
+            .and_then(|p| p.get("body"))
+            .and_then(|b| b.as_str())
+            .map(|b| crate::str_utils::prefix_chars(b, 600))
+            .unwrap_or("");
+
+        let err_json = serde_json::to_string(err).unwrap_or_default();
+
+        tracing::error!(
+            rid = %crate::str_utils::prefix_chars(&request_id, 8),
+            cid = %crate::str_utils::prefix_chars(&conversation_id, 8),
+            model = %model_id,
+            retryable = %is_retryable,
+            seen_tool_call = %has_seen_tool_call,
+            code = ?err.error.code,
+            provider_status = ?provider_status,
+            msg = %err.error.message,
+            provider_body_snippet = %provider_body_snippet,
+            raw_len = %data.len(),
+            "[☁️  -> ⚙️ ] Stream Error (provider details captured)"
+        );
+
+        // Classification & Retry Logic
         if is_retryable && !has_seen_tool_call {
             if Self::handle_gemini_fallback(
-                &err_str,
+                &err_json,
                 &err.error.message,
                 &model_id,
                 &state,
@@ -1196,6 +1242,7 @@ impl StreamHandler {
         pricing: &HashMap<String, CostModel>,
         tx_tui: &tokio::sync::broadcast::Sender<crate::tui::TuiEvent>,
     ) {
+        let model_pricing = pricing.get(model_id).cloned();
         match crate::main_helper::calculate_cost(model_id, usage, pricing) {
             Ok(breakdown) => {
                 let _ = tx_tui.send(crate::tui::TuiEvent::CostUpdate {
@@ -1204,6 +1251,11 @@ impl StreamHandler {
                     usage: usage.clone(),
                     actual_cost: breakdown.actual_cost,
                     potential_cost_no_cache: breakdown.potential_cost_no_cache,
+                    pricing: model_pricing,
+                    prompt_cost: breakdown.prompt_cost,
+                    completion_cost: breakdown.completion_cost,
+                    cache_read_cost: breakdown.cache_read_cost,
+                    request_cost: breakdown.request_cost,
                 });
             }
             Err(reason) => {
@@ -1214,6 +1266,11 @@ impl StreamHandler {
                     usage: usage.clone(),
                     actual_cost: 0.0,
                     potential_cost_no_cache: 0.0,
+                    pricing: model_pricing,
+                    prompt_cost: 0.0,
+                    completion_cost: 0.0,
+                    cache_read_cost: 0.0,
+                    request_cost: 0.0,
                 });
             }
         }

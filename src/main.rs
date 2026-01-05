@@ -827,6 +827,23 @@ async fn project_request(
     Ok(OpenRouterAdapter::project(context, model_id, flavor.as_ref(), &state.db, intent).await)
 }
 
+async fn handle_error_response(
+    response: reqwest::Response,
+    recorder: &mut crate::debug_utils::FlightRecorder,
+) -> Response {
+    let status = response.status();
+    let error_body = match response.text().await {
+        Ok(text) => text,
+        Err(e) => {
+            tracing::warn!("Failed to read error body: {}", e);
+            format!("Upstream error (body unreadable): {}", e)
+        }
+    };
+    tracing::error!("[☁️  -> ⚙️ ] Upstream Error: {}", error_body);
+    recorder.record_stage("upstream_error", serde_json::json!({ "body": error_body }));
+    (status, error_body).into_response()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_upstream_response(
     response: reqwest::Response,
@@ -843,16 +860,7 @@ async fn handle_upstream_response(
     tracing::info!("[☁️  -> ⚙️ ] Status: {}", status);
 
     if !status.is_success() {
-        let error_body = match response.text().await {
-            Ok(text) => text,
-            Err(e) => {
-                tracing::warn!("Failed to read error body: {}", e);
-                format!("Upstream error (body unreadable): {}", e)
-            }
-        };
-        tracing::error!("[☁️  -> ⚙️ ] Upstream Error: {}", error_body);
-        recorder.record_stage("upstream_error", serde_json::json!({ "body": error_body }));
-        return (status, error_body).into_response();
+        return handle_error_response(response, recorder).await;
     }
 
     let bytes_stream = response
@@ -864,6 +872,11 @@ async fn handle_upstream_response(
     );
 
     let (tx, rx) = mpsc::channel(100);
+
+    // Send an initial SSE comment immediately so Cloudflare/clients never see an "empty response".
+    // This hardens the stream against Cloudflare 520 errors when upstream (e.g. Gemini) returns an empty stream.
+    let _ = tx.try_send(Ok(axum::response::sse::Event::default().comment("parallax-stream-start")));
+
     let db = state.db.clone();
     let _conversation_id = context.conversation_id.clone();
     let tx_tui = state.tx_tui.clone();
@@ -874,6 +887,7 @@ async fn handle_upstream_response(
     let _ = current_span;
     let state_clone = state.clone();
     let rid_clone = request_id.clone();
+    let rid_log = request_id.clone();
     let cid_clone = context.conversation_id.clone();
     let model_clone = model_id.clone();
 
@@ -891,7 +905,7 @@ async fn handle_upstream_response(
             lines_stream,
             db,
             cid_clone,
-            request_id,
+            rid_clone,
             tx,
             model_id,
             pricing,
@@ -905,6 +919,11 @@ async fn handle_upstream_response(
         .instrument(stream_span)
         .await;
     });
+
+    tracing::info!(
+        rid = %crate::str_utils::prefix_chars(&rid_log, 8),
+        "[⚙️  -> 🖱️ ] SSE response created, stream task spawned"
+    );
 
     Sse::new(ReceiverStream::new(rx))
         .keep_alive(
@@ -982,7 +1001,7 @@ async fn main() {
 
     let filter = match tracing_subscriber::EnvFilter::try_from_default_env() {
         Ok(f) => f,
-        Err(_) => "parallax=debug,parallax::tui=off,parallax::streaming=off".into(),
+        Err(_) => "parallax=debug,parallax::tui=off,parallax::streaming=info".into(),
     };
 
     // Setup file logging
