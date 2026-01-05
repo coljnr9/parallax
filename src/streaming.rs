@@ -231,9 +231,15 @@ impl StreamHandler {
 
             let should_break = match line_result {
                 Ok(line) => {
-                    if let Some(data) = line.strip_prefix("data: ") {
+                    if let Some(data) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
+                        let data = data.trim();
                         if data == "[DONE]" {
                             tracing::debug!("[☁️  -> ⚙️ ] Stream end marker [DONE] received");
+
+                            // Note: Pulses are now sent immediately to the client (no buffering),
+                            // so we don't need to flush here. The buffered_pulses are only kept
+                            // for the diff-only guard check at stream end.
+
                             Some(false) // Success, not an error
                         } else {
                             Self::handle_provider_line(
@@ -330,8 +336,8 @@ impl StreamHandler {
         started_at_ms: u64,
         tools_were_advertised: bool,
         has_seen_tool_call: bool,
-        state: std::sync::Arc<AppState>,
-        buffered_pulses: &[ProviderPulse],
+        state: std::sync::Arc<AppState>,  // Used for empty-stream retry
+        _buffered_pulses: &[ProviderPulse],  // Kept for potential future diff-like retry logic
         tid: &str,
     ) {
         if let Some(usage) = &accumulator.usage {
@@ -470,6 +476,8 @@ impl StreamHandler {
         }
 
         // Check for diff-only response if tools were advertised but none were seen
+        // NOTE: Since we now send pulses immediately to prevent client timeouts,
+        // we can only LOG this condition, not retry (retrying would duplicate content).
         if tools_were_advertised && !has_seen_tool_call {
             let mut text_content = String::new();
             for part in &finalized_turn.content {
@@ -480,7 +488,7 @@ impl StreamHandler {
 
             if crate::hardening::is_diff_like(&text_content) {
                 tracing::warn!(
-                    "[⚙️ ] Model {} returned diff-like response without tool calls for request {}. Retrying with enforcement...",
+                    "[⚙️ ] Model {} returned diff-like response without tool calls for request {}. Content already sent to client.",
                     model_id,
                     request_id
                 );
@@ -489,40 +497,13 @@ impl StreamHandler {
                     level: "WARN".to_string(),
                     target: "parallax::streaming".to_string(),
                     message: format!(
-                        "Diff-like response without tool calls detected for {}; retrying once.",
+                        "Diff-like response without tool calls detected for {} (content already sent).",
                         request_id
                     ),
                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                 });
-
-                // Attempt retry
-                if let Err(e) = Self::retry_with_diff_enforcement(
-                    state,
-                    conversation_id,
-                    model_id,
-                    request_id,
-                    tx,
-                    tx_tui,
-                )
-                .await
-                {
-                    tracing::error!("[⚙️ ] Retry failed: {}", e);
-                    let _ = tx.send(Err(e.inner)).await;
-                }
-                return;
-            } else {
-                // If it's not diff-like, we flush the buffered pulses to the client now
-                for pulse in buffered_pulses {
-                    if let Ok(json) = serde_json::to_string(pulse) {
-                        if tx
-                            .send(Ok(axum::response::sse::Event::default().data(json)))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
+                // Note: We no longer retry here because content was already streamed to client.
+                // The diff-only guard is now informational only.
             }
         }
 
@@ -534,51 +515,40 @@ impl StreamHandler {
                 request_id
             );
 
-            // Universal Retry: If we haven't seen any tool calls and the stream is empty,
-            // we should try one more time. This handles transient provider glitches (like the GPT-5.2 case).
-            // We use a simple in-memory flag or check to prevent infinite loops.
-            // Ideally we'd have a `retry_count` in the signature, but for now we'll rely on the client not retrying indefinitely.
-            // A better approach is to check if we are already in a retry context, but `StreamHandler` doesn't know that easily without signature changes.
-            // However, we CAN reuse the existing `retry_with_diff_enforcement` mechanism or similar logic if we generalize it.
-
-            // Let's reuse `execute_retry_or_fallback` but with the SAME model.
-            // We need to guard against infinite loops. We can check if `request_id` has a retry suffix or check state.
-            // For now, we will log and emit a warning to the user, and attempt ONE retry if this isn't already a retry.
-            // Since we don't have explicit retry tracking passed to `handle_stream`, we'll use a heuristic:
-            // if we haven't emitted any events to the client yet (which we haven't if content is empty), we can try again transparently.
-
-            // Note: `retry_with_diff_enforcement` adds a specific system prompt. We just want a plain retry here.
-            // We'll call `execute_retry_or_fallback` with the original model ID.
-
-            tracing::warn!("[⚙️ ] Empty stream detected; attempting single transparency retry for {}", request_id);
+            // If the provider returned a 200 OK but 0 completion tokens, attempt a one-shot
+            // recovery by replaying the *exact* projected request we sent upstream.
+            //
+            // This is important for tool-heavy conversations where broad stop sequences like
+            // "User:"/"Observation:" can cause immediate stop. We strip `stop` on retry.
+            //
+            // NOTE: This only runs if the client is still connected (tx is usable).
             let _ = tx_tui.send(crate::tui::TuiEvent::LogMessage {
                 level: "WARN".to_string(),
                 target: "parallax::streaming".to_string(),
                 message: format!(
-                    "Model {} returned empty stream; retrying once transparently.",
-                    model_id
+                    "Model {} returned empty stream for {}; retrying once with stop sequences stripped.",
+                    model_id,
+                    request_id
                 ),
                 timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
             });
 
-            if let Err(e) = Self::execute_retry_or_fallback(
-                state,
+            if let Err(e) = Self::retry_with_projected_request(
+                state.clone(),
                 conversation_id.to_string(),
-                model_id.to_string(),
+                tid.to_string(),
                 tx,
-                tx_tui.clone(),
             )
             .await
             {
-                tracing::error!("[⚙️ ] Retry failed: {}", e);
-                // If retry fails, we fall through to the error response below
+                tracing::error!("[⚙️ ] Empty-stream retry failed: {}", e);
                 let error_msg = format!(
-                    "Model {} returned an empty response (retry failed). This is likely an upstream provider issue.",
+                    "Model {} returned an empty response (retry failed). Please retry your request.",
                     model_id
                 );
                 let _ = tx
                     .send(Err(ParallaxError::Upstream(
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::http::StatusCode::BAD_GATEWAY,
                         error_msg,
                     )))
                     .await;
@@ -869,6 +839,93 @@ impl StreamHandler {
             .await
     }
 
+    async fn retry_with_projected_request(
+        state: std::sync::Arc<AppState>,
+        conversation_id: String,
+        tid: String,
+        tx: &mpsc::Sender<std::result::Result<axum::response::sse::Event, ParallaxError>>,
+    ) -> crate::types::Result<()> {
+        // Load the exact projected upstream request we sent for this turn.
+        // This is robust: it preserves the full message history/tools/config that led to the failure.
+        let projected_path = std::path::Path::new("debug_capture")
+            .join("conversations")
+            .join(&conversation_id)
+            .join("turns")
+            .join(&tid)
+            .join("blobs")
+            .join("projected.json");
+
+        let projected_str = tokio::fs::read_to_string(&projected_path).await.map_err(|e| {
+            ParallaxError::Io(std::io::Error::other(format!(
+                "failed to read projected request at {}: {}",
+                projected_path.display(),
+                e
+            )))
+        })?;
+
+        let mut outgoing_request = serde_json::from_str::<crate::specs::openai::OpenAiRequest>(&projected_str)
+            .map_err(|e| {
+                ParallaxError::Internal(
+                    format!("failed to parse projected request JSON: {}", e),
+                    tracing_error::SpanTrace::capture(),
+                )
+            })?;
+
+        // Recovery tweak: remove stop sequences (they are a common cause of 0-token completions
+        // in tool-heavy transcripts, e.g. "User:"/"Observation:").
+        outgoing_request.stop = None;
+        outgoing_request.stream = Some(true);
+
+        let response = state
+            .client
+            .post("https://openrouter.ai/api/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", state.openrouter_key))
+            .json(&outgoing_request)
+            .send()
+            .await
+            .map_err(ParallaxError::Network)?;
+
+        if !response.status().is_success() {
+            let err_body = match response.text().await {
+                Ok(t) => t,
+                Err(_) => "Unknown error (failed to read response text)".to_string(),
+            };
+            return Err(ParallaxError::Upstream(
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("Empty-stream retry failed: {}", err_body),
+            )
+            .into());
+        }
+
+        let bytes_stream = response
+            .bytes_stream()
+            .map(|r| r.map_err(std::io::Error::other));
+        let mut lines_stream = FramedRead::new(
+            tokio_util::io::StreamReader::new(bytes_stream),
+            LinesCodec::new_with_max_length(1024 * 1024),
+        );
+
+        while let Some(line_result) = lines_stream.next().await {
+            match line_result {
+                Ok(line) => {
+                    if let Some(data) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
+                        let data = data.trim();
+                        if tx
+                            .send(Ok(axum::response::sse::Event::default().data(data)))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        Ok(())
+    }
+
     async fn execute_retry_or_fallback(
         state: std::sync::Arc<AppState>,
         conversation_id: String,
@@ -1016,27 +1073,14 @@ impl StreamHandler {
         tracing::trace!("[☁️  -> ⚙️ ] Pulse: {:?}", pulse);
         Self::process_pulse(&pulse, conversation_id, tool_index_map, accumulator).await;
 
-        // If tools were advertised but we haven't seen any tool calls yet,
-        // we buffer the response instead of sending it directly to the client.
-        // This is to allow for the diff-only guard to trigger if needed.
+        // IMPORTANT: We always send pulses to the client immediately to prevent timeouts.
+        // Previously we buffered until tool calls appeared, but this caused Cursor to timeout
+        // waiting 20+ seconds for extended thinking models like GPT-5.2.
+        //
+        // We still keep a copy in buffered_pulses for the diff-only guard check at stream end,
+        // but the client gets data right away.
         if tools_were_advertised && !*has_seen_tool_call {
-            buffered_pulses.push(pulse);
-            return None;
-        }
-
-        // Send buffered pulses if this is the first tool call
-        if *has_seen_tool_call && !buffered_pulses.is_empty() {
-            for p in buffered_pulses.drain(..) {
-                if let Ok(json) = serde_json::to_string(&p) {
-                    if tx
-                        .send(Ok(axum::response::sse::Event::default().data(json)))
-                        .await
-                        .is_err()
-                    {
-                        return Some(false);
-                    }
-                }
-            }
+            buffered_pulses.push(pulse.clone());
         }
 
         // Re-serialize the sanitized pulse
@@ -1101,6 +1145,7 @@ impl StreamHandler {
         None
     }
 
+    #[allow(dead_code)]  // Kept for potential future diff-only retry logic
     async fn retry_with_diff_enforcement(
         state: std::sync::Arc<AppState>,
         conversation_id: &str,

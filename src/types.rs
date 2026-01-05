@@ -605,7 +605,7 @@ pub struct InternalPulse {
     pub usage: Option<Usage>,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct PulseDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
@@ -648,7 +648,7 @@ impl PulseDelta {
     }
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct ProviderPulseChoice {
     pub delta: PulseDelta,
     pub finish_reason: Option<String>,
@@ -805,7 +805,7 @@ pub enum LineEvent {
     Unknown(String),
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct ProviderPulse {
     #[serde(default)]
     pub id: String,
@@ -816,7 +816,7 @@ pub struct ProviderPulse {
     pub usage: Option<Usage>,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct ProviderToolCallDelta {
     pub index: u32,
     pub id: Option<String>,
@@ -825,7 +825,7 @@ pub struct ProviderToolCallDelta {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct RawFunction {
     pub name: Option<String>,
     pub arguments: Option<String>,
@@ -868,6 +868,12 @@ pub fn parse_provider_line(data: &str) -> LineEvent {
             return LineEvent::Pulse(pulse);
         }
     }
+    let snippet = if data.len() > 200 {
+        format!("{}...", &data[..200])
+    } else {
+        data.to_string()
+    };
+    tracing::debug!("[STREAM] Unknown line format: {}", snippet);
     LineEvent::Unknown(data.to_string())
 }
 

@@ -21,6 +21,9 @@ pub struct OpenAiRequest {
     pub max_tokens: Option<u32>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<OpenAiTool>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,11 +97,11 @@ pub struct OpenAiToolCall {
     pub function: OpenAiFunctionCall,
 
     /// OpenRouter aggregator specific: holds reasoning token
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub thought_signature: Option<String>,
 
     /// OpenRouter aggregator specific: holds reasoning_details
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub extra_content: Option<serde_json::Value>,
 }
 

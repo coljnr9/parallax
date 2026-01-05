@@ -406,6 +406,7 @@ impl AppState {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_cost_update(
         &mut self,
         id: RequestId,
@@ -1479,7 +1480,7 @@ impl App {
             };
 
             // Simplify model name for display
-            let display_name = model_id.split('/').last().unwrap_or(model_id);
+            let display_name = model_id.split('/').next_back().unwrap_or(model_id);
 
             if is_compact {
                 Row::new(vec![
@@ -1667,6 +1668,7 @@ impl GraphState {
         }
     }
 
+    #[allow(dead_code)]
     fn get_model_color(&self, model: &str) -> Color {
         match self.model_colors.get(model) {
             Some(color) => *color,
@@ -1674,6 +1676,7 @@ impl GraphState {
         }
     }
 
+    #[allow(dead_code)]
     fn get_total_tps(&self) -> f64 {
         self.models
             .values()
@@ -1682,6 +1685,7 @@ impl GraphState {
             .sum()
     }
 
+    #[allow(dead_code)]
     fn get_total_tokens(&self) -> u64 {
         self.models
             .values()
@@ -1689,6 +1693,7 @@ impl GraphState {
             .sum()
     }
 
+    #[allow(dead_code)]
     fn get_total_cost(&self) -> f64 {
         self.models
             .values()

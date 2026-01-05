@@ -23,12 +23,10 @@ pub trait ProviderFlavor: Send + Sync {
         false
     }
     fn stop_sequences(&self) -> Vec<String> {
-        vec![
-            "</tool_code>".to_string(),
-            "User:".to_string(),
-            "<|user|>".to_string(),
-            "Observation:".to_string(),
-        ]
+        // IMPORTANT: Keep stop sequences narrow. Broad stop sequences like "User:" or
+        // "Observation:" frequently appear in tool-heavy conversations (e.g. tool transcripts),
+        // and can cause providers to immediately stop generation with 0 completion tokens.
+        vec!["</tool_code>".to_string()]
     }
 }
 
@@ -110,14 +108,18 @@ impl OpenRouterAdapter {
         _intent: Option<crate::tui::Intent>,
     ) -> OpenAiRequest {
         tracing::info!("[⚙️  -> ⚙️ ] Projecting turn for model: {}", model_id);
-        let is_thinking = model_id.contains("thinking") || model_id.contains("claude-3.7");
+        let is_thinking = model_id.contains("thinking")
+            || model_id.contains("claude-3.7")
+            || model_id.contains("gpt-5")
+            || model_id.contains("o1")
+            || model_id.contains("o3");
 
         // Extract and prune history if needed for Google models
         let pruned_context = Self::prune_history_if_needed(context, flavor);
 
         let messages = Self::transform_messages(&pruned_context, flavor, db).await;
 
-        let (max_tokens, extra) = Self::extract_request_config(context, is_thinking);
+        let (max_tokens, max_completion_tokens, extra) = Self::extract_request_config(context, is_thinking);
 
         let stop = Some(flavor.stop_sequences());
 
@@ -146,6 +148,7 @@ impl OpenRouterAdapter {
                 .and_then(|v| v.as_f64())
                 .map(|v| v as f32),
             max_tokens,
+            max_completion_tokens,
             tools,
             tool_choice,
             stop,
@@ -528,7 +531,7 @@ impl OpenRouterAdapter {
     fn extract_request_config(
         context: &ConversationContext,
         is_thinking: bool,
-    ) -> (Option<u32>, HashMap<String, serde_json::Value>) {
+    ) -> (Option<u32>, Option<u32>, HashMap<String, serde_json::Value>) {
         let mut extra = HashMap::new();
         if let Some(obj) = context.extra_body.as_object() {
             for (k, v) in obj {
@@ -542,6 +545,7 @@ impl OpenRouterAdapter {
                         | "tools"
                         | "tool_choice"
                         | "max_tokens"
+                        | "max_completion_tokens"
                         | "system"
                         | "stream_options"
                         | "metadata"
@@ -565,18 +569,49 @@ impl OpenRouterAdapter {
             .get("max_tokens")
             .and_then(|v| v.as_u64())
             .map(|v| v as u32);
+
+        let mut max_completion_tokens = context
+            .extra_body
+            .get("max_completion_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
+        // Safety floors for max_tokens to prevent providers from ending response immediately
+        // (common when Cursor thinks context is full and sends 0).
         if is_thinking {
             // Force at least 64k tokens for thinking models to prevent cutoffs
-            let max_tokens_val = match max_tokens {
-                Some(v) => v,
-                None => 0,
-            };
-            if max_tokens_val < 64000 {
-                max_tokens = Some(64000);
+            let floor = 64000;
+            if let Some(val) = max_tokens {
+                if val < floor {
+                    max_tokens = Some(floor);
+                }
+            } else {
+                // If missing, consider defaulting, but usually provider default is fine.
+                // However, if we want to enforce it:
+                // max_tokens = Some(floor);
+            }
+
+            if let Some(val) = max_completion_tokens {
+                if val < floor {
+                    max_completion_tokens = Some(floor);
+                }
+            }
+        } else {
+            // Even for standard models, never send 0. Floor at 4096.
+            let floor = 4096;
+            if let Some(val) = max_tokens {
+                if val < floor {
+                    max_tokens = Some(floor);
+                }
+            }
+            if let Some(val) = max_completion_tokens {
+                if val < floor {
+                    max_completion_tokens = Some(floor);
+                }
             }
         }
 
-        (max_tokens, extra)
+        (max_tokens, max_completion_tokens, extra)
     }
 
     fn project_tool_choice(raw_choice: &serde_json::Value) -> serde_json::Value {

@@ -928,7 +928,7 @@ async fn handle_upstream_response(
     Sse::new(ReceiverStream::new(rx))
         .keep_alive(
             KeepAlive::new()
-                .interval(Duration::from_secs(15))
+                .interval(Duration::from_secs(10))
                 .text(": keepalive"),
         )
         .into_response()
