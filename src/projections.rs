@@ -1,6 +1,6 @@
 use crate::specs::openai::*;
 use crate::types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
@@ -168,6 +168,7 @@ impl OpenRouterAdapter {
 
         history = Self::prune_for_google_limits(history, flavor);
         history = Self::prune_for_context_budget(history, model_id, pricing_map);
+        history = Self::drop_orphan_tool_results(history);
 
         let mut pruned_context = context.clone();
         pruned_context.history = history;
@@ -238,6 +239,60 @@ impl OpenRouterAdapter {
         }
 
         history
+    }
+
+
+    /// After pruning/windowing, it is possible to end up with a Tool result whose
+    /// corresponding ToolCall turn was pruned away. OpenAI rejects that shape:
+    /// "No tool call found for function call output with call_id ...".
+    ///
+    /// This pass removes orphan tool results to preserve request validity.
+    fn drop_orphan_tool_results(history: Vec<TurnRecord>) -> Vec<TurnRecord> {
+        let mut seen_tool_call_ids: HashSet<String> = HashSet::new();
+        let mut out: Vec<TurnRecord> = Vec::with_capacity(history.len());
+
+        for turn in history {
+            // Record any tool calls present on this turn (usually assistant turns)
+            for part in &turn.content {
+                if let MessagePart::ToolCall { id, .. } = part {
+                    seen_tool_call_ids.insert(id.clone());
+                }
+            }
+
+            if turn.role == Role::Tool {
+                // Tool turns must refer to a prior tool call id.
+                let mut tool_result_id: Option<String> = turn.tool_call_id.clone();
+                if tool_result_id.is_none() {
+                    tool_result_id = turn.content.iter().find_map(|p| {
+                        if let MessagePart::ToolResult { tool_call_id, .. } = p {
+                            Some(tool_call_id.clone())
+                        } else {
+                            None
+                        }
+                    });
+                }
+
+                match tool_result_id {
+                    Some(id) => {
+                        if !seen_tool_call_ids.contains(&id) {
+                            tracing::warn!(
+                                "[HISTORY] Dropping orphan tool result with tool_call_id={} (no matching tool call in pruned history)",
+                                id
+                            );
+                            continue;
+                        }
+                    }
+                    None => {
+                        tracing::warn!("[HISTORY] Dropping tool turn with no tool_call_id");
+                        continue;
+                    }
+                }
+            }
+
+            out.push(turn);
+        }
+
+        out
     }
     fn extract_tools(extra_body: &serde_json::Value) -> Option<Vec<OpenAiTool>> {
         let raw_tools = extra_body.get("tools")?.as_array()?;
@@ -764,5 +819,86 @@ mod tests {
         };
 
         let _flavor = AnthropicFlavor;
+    }
+}
+
+#[cfg(test)]
+mod orphan_tool_result_tests {
+    use super::*;
+    use crate::types::{MessagePart, Role, TurnRecord};
+    use serde_json::json;
+
+    #[test]
+    fn drops_orphan_tool_turn_without_matching_tool_call() {
+        // Tool result refers to a call id that never appeared as a ToolCall in the kept history.
+        let history = vec![
+            TurnRecord {
+                role: Role::User,
+                content: vec![MessagePart::Text {
+                    content: "hi".to_string(),
+                    cache_control: None,
+                }],
+                tool_call_id: None,
+            },
+            TurnRecord {
+                role: Role::Tool,
+                content: vec![MessagePart::ToolResult {
+                    tool_call_id: "call_orphan".to_string(),
+                    content: "result".to_string(),
+                    is_error: false,
+                    name: Some("list_dir".to_string()),
+                    cache_control: None,
+                }],
+                tool_call_id: Some("call_orphan".to_string()),
+            },
+            TurnRecord {
+                role: Role::Assistant,
+                content: vec![MessagePart::Text {
+                    content: "ok".to_string(),
+                    cache_control: None,
+                }],
+                tool_call_id: None,
+            },
+        ];
+
+        let pruned = OpenRouterAdapter::drop_orphan_tool_results(history);
+
+        assert_eq!(pruned.len(), 2);
+        assert!(pruned.iter().all(|t| t.role != Role::Tool));
+    }
+
+    #[test]
+    fn preserves_tool_turn_when_matching_tool_call_exists() {
+        let history = vec![
+            TurnRecord {
+                role: Role::Assistant,
+                content: vec![MessagePart::ToolCall {
+                    id: "call_123".to_string(),
+                    name: "list_dir".to_string(),
+                    arguments: json!({"target_directory": "/tmp", "ignore_globs": []}),
+                    signature: None,
+                    metadata: json!({}),
+                    cache_control: None,
+                }],
+                tool_call_id: None,
+            },
+            TurnRecord {
+                role: Role::Tool,
+                content: vec![MessagePart::ToolResult {
+                    tool_call_id: "call_123".to_string(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                    name: Some("list_dir".to_string()),
+                    cache_control: None,
+                }],
+                tool_call_id: Some("call_123".to_string()),
+            },
+        ];
+
+        let pruned = OpenRouterAdapter::drop_orphan_tool_results(history);
+
+        assert_eq!(pruned.len(), 2);
+        assert_eq!(pruned[0].role, Role::Assistant);
+        assert_eq!(pruned[1].role, Role::Tool);
     }
 }

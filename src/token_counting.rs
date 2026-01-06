@@ -48,6 +48,7 @@ impl TokenEstimator {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::Role;
     use super::*;
     use crate::types::{MessagePart, TurnRecord};
     use serde_json::json;
