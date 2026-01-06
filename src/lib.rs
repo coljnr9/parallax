@@ -27,6 +27,7 @@ pub mod specs;
 pub mod str_utils;
 pub mod streaming;
 pub mod tag_extract;
+pub mod token_counting;
 pub mod tool_schema;
 pub mod tui;
 pub mod types;

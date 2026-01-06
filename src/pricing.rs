@@ -47,7 +47,12 @@ fn parse_pricing_json(json: &serde_json::Value) -> std::collections::HashMap<Str
     if let Some(models) = json.get("data").and_then(|d| d.as_array()) {
         for m in models {
             if let (Some(id), Some(p)) = (m.get("id").and_then(|v| v.as_str()), m.get("pricing")) {
-                let model = parse_single_model_pricing(id, p);
+                let context_length = m
+                    .get("context_length")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+                let mut model = parse_single_model_pricing(id, p);
+                model.context_length = context_length;
                 pricing.insert(id.to_string(), model);
             }
         }
@@ -100,5 +105,6 @@ fn parse_single_model_pricing(_id: &str, p: &serde_json::Value) -> CostModel {
         request,
         prompt_cache_read,
         prompt_cache_write,
+        context_length: None,
     }
 }

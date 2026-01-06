@@ -271,7 +271,8 @@ async fn chat_completions_handler(
         return *resp;
     }
 
-    let entry = match ParallaxEngine::lift(payload.clone(), &state.db, cursor_conversation_id).await {
+    let entry = match ParallaxEngine::lift(payload.clone(), &state.db, cursor_conversation_id).await
+    {
         Ok(e) => e,
         Err(e) => {
             tracing::error!("[🖱️  -> ⚙️ ] Lift Failed: {}", e);
@@ -824,7 +825,15 @@ async fn project_request(
     flavor: Arc<dyn ProviderFlavor + Send + Sync>,
     intent: Option<crate::tui::Intent>,
 ) -> std::result::Result<crate::specs::openai::OpenAiRequest, Response> {
-    Ok(OpenRouterAdapter::project(context, model_id, flavor.as_ref(), &state.db, intent).await)
+    Ok(OpenRouterAdapter::project(
+        context,
+        model_id,
+        flavor.as_ref(),
+        &state.db,
+        intent,
+        &state.pricing,
+    )
+    .await)
 }
 
 async fn handle_error_response(
@@ -875,7 +884,9 @@ async fn handle_upstream_response(
 
     // Send an initial SSE comment immediately so Cloudflare/clients never see an "empty response".
     // This hardens the stream against Cloudflare 520 errors when upstream (e.g. Gemini) returns an empty stream.
-    let _ = tx.try_send(Ok(axum::response::sse::Event::default().comment("parallax-stream-start")));
+    let _ = tx.try_send(Ok(
+        axum::response::sse::Event::default().comment("parallax-stream-start")
+    ));
 
     let db = state.db.clone();
     let _conversation_id = context.conversation_id.clone();

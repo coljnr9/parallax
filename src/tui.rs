@@ -426,7 +426,10 @@ impl AppState {
             req.potential_cost_no_cache = Some(potential_cost_no_cache);
         }
         self.session_cost.0 += actual_cost.0;
-        self.model_costs.entry(model.clone()).or_insert(CostUsd(0.0)).0 += actual_cost.0;
+        self.model_costs
+            .entry(model.clone())
+            .or_insert(CostUsd(0.0))
+            .0 += actual_cost.0;
 
         // Update session-level model stats
         let stats = self.model_stats.entry(model).or_default();
@@ -1425,17 +1428,28 @@ impl App {
         };
 
         let totals_block = Paragraph::new(totals_text)
-            .block(Block::default().borders(Borders::ALL).title(" SESSION TOTALS "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" SESSION TOTALS "),
+            )
             .style(Style::default().fg(Color::Cyan));
         f.render_widget(totals_block, chunks[0]);
 
         // 2. Per-Model Table
-        let mut rows: Vec<(String, &ModelSessionStats)> = self.state.model_stats.iter()
+        let mut rows: Vec<(String, &ModelSessionStats)> = self
+            .state
+            .model_stats
+            .iter()
             .map(|(k, v)| (k.clone(), v))
             .collect();
-        
+
         // Sort by actual cost descending
-        rows.sort_by(|a, b| b.1.actual_cost.partial_cmp(&a.1.actual_cost).unwrap_or(std::cmp::Ordering::Equal));
+        rows.sort_by(|a, b| {
+            b.1.actual_cost
+                .partial_cmp(&a.1.actual_cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let table_header = if is_compact {
             Row::new(vec![
@@ -1445,7 +1459,8 @@ impl App {
                 Cell::from("COST"),
                 Cell::from("SAVED"),
                 Cell::from("CACHE"),
-            ]).style(Style::default().add_modifier(Modifier::BOLD))
+            ])
+            .style(Style::default().add_modifier(Modifier::BOLD))
         } else {
             Row::new(vec![
                 Cell::from("MODEL ID"),
@@ -1456,54 +1471,83 @@ impl App {
                 Cell::from("ACTUAL COST"),
                 Cell::from("SAVINGS"),
                 Cell::from("RATES (P/C/R)"),
-            ]).style(Style::default().add_modifier(Modifier::BOLD))
+            ])
+            .style(Style::default().add_modifier(Modifier::BOLD))
         };
 
-        let table_rows: Vec<Row> = rows.iter().map(|(model_id, stats)| {
-            let model_tps = if stats.total_latency_ms > 0 {
-                stats.completion_tokens as f64 / (stats.total_latency_ms as f64 / 1000.0)
-            } else {
-                0.0
-            };
+        let table_rows: Vec<Row> = rows
+            .iter()
+            .map(|(model_id, stats)| {
+                let model_tps = if stats.total_latency_ms > 0 {
+                    stats.completion_tokens as f64 / (stats.total_latency_ms as f64 / 1000.0)
+                } else {
+                    0.0
+                };
 
-            let model_savings = (stats.potential_cost_no_cache - stats.actual_cost).max(0.0);
-            let model_cache_rate = if (stats.prompt_tokens + stats.completion_tokens) > 0 {
-                (stats.cached_tokens as f64 / (stats.prompt_tokens + stats.completion_tokens) as f64) * 100.0
-            } else {
-                0.0
-            };
+                let model_savings = (stats.potential_cost_no_cache - stats.actual_cost).max(0.0);
+                let model_cache_rate = if (stats.prompt_tokens + stats.completion_tokens) > 0 {
+                    (stats.cached_tokens as f64
+                        / (stats.prompt_tokens + stats.completion_tokens) as f64)
+                        * 100.0
+                } else {
+                    0.0
+                };
 
-            let pricing_str = if let Some(p) = &stats.pricing {
-                format!("{:.1}/{:.1}/{:.1}", p.prompt * 1_000_000.0, p.completion * 1_000_000.0, p.prompt_cache_read * 1_000_000.0)
-            } else {
-                "N/A".to_string()
-            };
+                let pricing_str = if let Some(p) = &stats.pricing {
+                    format!(
+                        "{:.1}/{:.1}/{:.1}",
+                        p.prompt * 1_000_000.0,
+                        p.completion * 1_000_000.0,
+                        p.prompt_cache_read * 1_000_000.0
+                    )
+                } else {
+                    "N/A".to_string()
+                };
 
-            // Simplify model name for display
-            let display_name = model_id.split('/').next_back().unwrap_or(model_id);
+                // Simplify model name for display
+                let display_name = model_id.split('/').next_back().unwrap_or(model_id);
 
-            if is_compact {
-                Row::new(vec![
-                    Cell::from(display_name.to_string()),
-                    Cell::from(stats.total_requests.to_string()),
-                    Cell::from(format!("{:.1}", model_tps)),
-                    Cell::from(format!("${:.3}", stats.actual_cost)),
-                    Cell::from(format!("${:.3}", model_savings)),
-                    Cell::from(format!("{:.0}%", model_cache_rate)),
-                ])
-            } else {
-                Row::new(vec![
-                    Cell::from(display_name.to_string()),
-                    Cell::from(format!("{} ({}/{})", stats.total_requests, stats.successful_requests, stats.failed_requests)),
-                    Cell::from(format!("{:.1}", model_tps)),
-                    Cell::from(format!("{}/{}", stats.prompt_tokens, stats.completion_tokens)),
-                    Cell::from(format!("{} ({:.1}%)", stats.cached_tokens, model_cache_rate)),
-                    Cell::from(Span::styled(format!("${:.4}", stats.actual_cost), Style::default().fg(Color::Green))),
-                    Cell::from(Span::styled(format!("${:.4}", model_savings), Style::default().fg(Color::Yellow))),
-                    Cell::from(Span::styled(pricing_str, Style::default().fg(Color::DarkGray))),
-                ])
-            }
-        }).collect();
+                if is_compact {
+                    Row::new(vec![
+                        Cell::from(display_name.to_string()),
+                        Cell::from(stats.total_requests.to_string()),
+                        Cell::from(format!("{:.1}", model_tps)),
+                        Cell::from(format!("${:.3}", stats.actual_cost)),
+                        Cell::from(format!("${:.3}", model_savings)),
+                        Cell::from(format!("{:.0}%", model_cache_rate)),
+                    ])
+                } else {
+                    Row::new(vec![
+                        Cell::from(display_name.to_string()),
+                        Cell::from(format!(
+                            "{} ({}/{})",
+                            stats.total_requests, stats.successful_requests, stats.failed_requests
+                        )),
+                        Cell::from(format!("{:.1}", model_tps)),
+                        Cell::from(format!(
+                            "{}/{}",
+                            stats.prompt_tokens, stats.completion_tokens
+                        )),
+                        Cell::from(format!(
+                            "{} ({:.1}%)",
+                            stats.cached_tokens, model_cache_rate
+                        )),
+                        Cell::from(Span::styled(
+                            format!("${:.4}", stats.actual_cost),
+                            Style::default().fg(Color::Green),
+                        )),
+                        Cell::from(Span::styled(
+                            format!("${:.4}", model_savings),
+                            Style::default().fg(Color::Yellow),
+                        )),
+                        Cell::from(Span::styled(
+                            pricing_str,
+                            Style::default().fg(Color::DarkGray),
+                        )),
+                    ])
+                }
+            })
+            .collect();
 
         let table = if is_compact {
             let widths = [
@@ -1531,7 +1575,11 @@ impl App {
 
         let table = table
             .header(table_header)
-            .block(Block::default().borders(Borders::ALL).title(" PER-MODEL SESSION SUMMARY "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" PER-MODEL SESSION SUMMARY "),
+            )
             .column_spacing(1)
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
@@ -1951,11 +1999,11 @@ mod graph_tests {
         let mut graph_state = GraphState::new();
 
         // First model should get first color
-        graph_state.record_request_completion("model1", 100, LatencyMs(2000), Color::White);
+        graph_state.record_request_completion("model1", 100, LatencyMs(2000), CostUsd(0.01));
         let color1 = graph_state.get_model_color("model1");
 
         // Second model should get second color
-        graph_state.record_request_completion("model2", 100, LatencyMs(2000), Color::White);
+        graph_state.record_request_completion("model2", 100, LatencyMs(2000), CostUsd(0.01));
         let color2 = graph_state.get_model_color("model2");
 
         assert_ne!(color1, color2);

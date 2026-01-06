@@ -288,10 +288,10 @@ pub struct CursorTagScrubber {
 enum ScrubberState {
     #[default]
     Normal,
-    InTagOpening(String), // The partial tag being read: e.g. "user_qu"
+    InTagOpening(String),         // The partial tag being read: e.g. "user_qu"
     InTagClosing(String, String), // (tag_to_match, partial_closing_tag) e.g. ("user_query", "/user_qu")
-    Redacting(String),    // tag_name being redacted
-    Unrolling(String),    // tag_name whose content we are keeping, but we want to drop its closing tag
+    Redacting(String),            // tag_name being redacted
+    Unrolling(String), // tag_name whose content we are keeping, but we want to drop its closing tag
 }
 
 impl CursorTagScrubber {
@@ -317,8 +317,11 @@ impl CursorTagScrubber {
                 ScrubberState::InTagOpening(mut partial) => {
                     if c == '>' {
                         let tag_name = partial.clone();
-                        let is_scaffolding = registry.tags.iter().any(|t| t.tag == tag_name && t.is_scaffolding);
-                        
+                        let is_scaffolding = registry
+                            .tags
+                            .iter()
+                            .any(|t| t.tag == tag_name && t.is_scaffolding);
+
                         if is_scaffolding {
                             if tag_name == "user_query" {
                                 // For user_query, we drop the tags but keep the content
@@ -338,7 +341,7 @@ impl CursorTagScrubber {
                         partial.push(c);
                         self.state = ScrubberState::InTagOpening(partial);
                     } else if c == '/' && partial.is_empty() {
-                         self.state = ScrubberState::InTagClosing(String::new(), "/".to_string());
+                        self.state = ScrubberState::InTagClosing(String::new(), "/".to_string());
                     } else {
                         // Not a valid tag character
                         output.push('<');
@@ -377,8 +380,11 @@ impl CursorTagScrubber {
                                 // We are in Redacting/Unrolling mode but this wasn't our closing tag
                                 // If we were unrolling, we must emit the '<', the partial, and the '>' because it might be a nested tag or just text
                                 // Wait, if we are in Unrolling, and we see <other_tag>, we should just emit it.
-                                let is_unrolling = registry.tags.iter().any(|t| t.tag == tag_to_match && t.tag == "user_query");
-                                
+                                let is_unrolling = registry
+                                    .tags
+                                    .iter()
+                                    .any(|t| t.tag == tag_to_match && t.tag == "user_query");
+
                                 if is_unrolling {
                                     output.push('<');
                                     output.push_str(&partial_close);
@@ -399,7 +405,10 @@ impl CursorTagScrubber {
                         output.push(c);
                         self.state = ScrubberState::Normal;
                     } else {
-                        let is_unrolling = registry.tags.iter().any(|t| t.tag == tag_to_match && t.tag == "user_query");
+                        let is_unrolling = registry
+                            .tags
+                            .iter()
+                            .any(|t| t.tag == tag_to_match && t.tag == "user_query");
                         if is_unrolling {
                             output.push('<');
                             output.push_str(&partial_close);
@@ -433,7 +442,7 @@ impl CursorTagScrubber {
                 } else {
                     let is_unrolling = tag_to_match == "user_query";
                     if is_unrolling {
-                         format!("<{}", partial_close)
+                        format!("<{}", partial_close)
                     } else {
                         String::new()
                     }

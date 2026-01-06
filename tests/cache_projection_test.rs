@@ -59,6 +59,7 @@ mod tests {
         let _context = ConversationContext {
             history,
             conversation_id: "test".to_string(),
+            conversation_id_source: ConversationIdSource::Unknown,
             extra_body: json!({}),
         };
 

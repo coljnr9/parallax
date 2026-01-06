@@ -102,3 +102,31 @@ If you experience "connection lost" or streaming failures:
 ## ⚖️ License
 
 Apache License 2.0. See [LICENSE](LICENSE) for details.
+
+## 📜 Logs & Retention
+
+Parallax writes two primary local log streams:
+
+- **Server log**: `./parallax.log` (rotated daily)
+- **Agent trace (NDJSON)**: `./logs/trace_buffer.json` (rotated daily)
+
+On startup, Parallax applies a retention policy to these rotated files:
+
+- **Age-based retention**: keep up to ~60 hours (~2.5 days)
+- **Size-based retention**: keep up to ~5GB total per log stream
+- **Safety cap**: keep at most 512 files (as a last resort)
+
+### Grepping across rotated logs
+
+Because logs rotate, you usually want to search across all matching files:
+
+```bash
+# Server logs
+rg "<needle>" parallax.log*
+
+# Agent trace logs
+rg "<needle>" logs/trace_buffer.json*
+
+# Follow current server log live
+tail -f parallax.log
+```

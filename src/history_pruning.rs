@@ -7,7 +7,6 @@ use crate::str_utils;
 use crate::types::{MessagePart, Role, TurnRecord};
 use serde_json;
 
-
 // Google/Gemini can error on overly deep JSON payloads (especially nested tool args/results).
 // We measure nesting depth and only prune when depth is high (not just when turn-count is high).
 const GOOGLE_MAX_JSON_NESTING_EXCEEDS: usize = 80;
@@ -186,14 +185,53 @@ pub enum PruningStrategy {
 pub fn prune_history(
     history: Vec<TurnRecord>,
     strategy: PruningStrategy,
-    target_turns: usize,
+    target_budget: usize,
 ) -> Vec<TurnRecord> {
     match strategy {
-        PruningStrategy::Windowing => prune_windowing(history, target_turns),
-        PruningStrategy::Summarization => prune_summarization(history, target_turns),
-        PruningStrategy::Flattening => prune_flattening(history, target_turns),
-        PruningStrategy::SelectiveDeletion => prune_selective_deletion(history, target_turns),
+        PruningStrategy::Windowing => prune_windowing(history, target_budget),
+        PruningStrategy::Summarization => prune_summarization(history, target_budget),
+        PruningStrategy::Flattening => prune_flattening(history, target_budget),
+        PruningStrategy::SelectiveDeletion => prune_selective_deletion(history, target_budget),
     }
+}
+
+/// Prunes history by dropping turns from the beginning until it fits within max_tokens.
+/// Always preserves the system prompt if present at index 0.
+pub fn prune_to_token_budget(mut history: Vec<TurnRecord>, max_tokens: usize) -> Vec<TurnRecord> {
+    let mut current_tokens = crate::token_counting::TokenEstimator::estimate_total_tokens(&history);
+    if current_tokens <= max_tokens {
+        return history;
+    }
+
+    tracing::info!(
+        "[PRUNE] History exceeds budget ({} > {}). Pruning turns...",
+        current_tokens,
+        max_tokens
+    );
+
+    // Keep system prompt if it's the first message
+    let has_system = match history.first() {
+        Some(t) => t.role == Role::System,
+        None => false,
+    };
+    let system_prompt = if has_system {
+        Some(history.remove(0))
+    } else {
+        None
+    };
+
+    // Remove turns from the front until we fit
+    while !history.is_empty() && current_tokens > max_tokens {
+        let removed = history.remove(0);
+        current_tokens -= crate::token_counting::TokenEstimator::estimate_turn_tokens(&removed);
+    }
+
+    // Re-insert system prompt
+    if let Some(sys) = system_prompt {
+        history.insert(0, sys);
+    }
+
+    history
 }
 
 /// Windowing strategy: keep first N and last M messages

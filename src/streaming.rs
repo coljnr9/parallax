@@ -231,7 +231,10 @@ impl StreamHandler {
 
             let should_break = match line_result {
                 Ok(line) => {
-                    if let Some(data) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
+                    if let Some(data) = line
+                        .strip_prefix("data: ")
+                        .or_else(|| line.strip_prefix("data:"))
+                    {
                         let data = data.trim();
                         if data == "[DONE]" {
                             tracing::debug!("[☁️  -> ⚙️ ] Stream end marker [DONE] received");
@@ -265,9 +268,7 @@ impl StreamHandler {
                         None
                     }
                 }
-                Err(e) => {
-                    Some(Self::handle_line_error(e, &tx).await)
-                }
+                Err(e) => Some(Self::handle_line_error(e, &tx).await),
             };
 
             if let Some(is_error) = should_break {
@@ -336,8 +337,8 @@ impl StreamHandler {
         started_at_ms: u64,
         tools_were_advertised: bool,
         has_seen_tool_call: bool,
-        state: std::sync::Arc<AppState>,  // Used for empty-stream retry
-        _buffered_pulses: &[ProviderPulse],  // Kept for potential future diff-like retry logic
+        state: std::sync::Arc<AppState>, // Used for empty-stream retry
+        _buffered_pulses: &[ProviderPulse], // Kept for potential future diff-like retry logic
         tid: &str,
     ) {
         if let Some(usage) = &accumulator.usage {
@@ -582,14 +583,33 @@ impl StreamHandler {
         e: tokio_util::codec::LinesCodecError,
         tx: &mpsc::Sender<std::result::Result<axum::response::sse::Event, ParallaxError>>,
     ) -> bool {
-        tracing::error!("stream.parse_error: {}", e);
-        let io_err = match e {
-            tokio_util::codec::LinesCodecError::Io(io) => io,
-            tokio_util::codec::LinesCodecError::MaxLineLengthExceeded => {
-                std::io::Error::other("Max line length exceeded")
+        match e {
+            tokio_util::codec::LinesCodecError::Io(io) => {
+                // This usually means the upstream closed/reset the HTTP stream mid-frame.
+                tracing::error!(
+                    io_kind = ?io.kind(),
+                    io_error = %io,
+                    "stream.parse_error: upstream IO error while decoding stream"
+                );
+
+                // Wrap to preserve the kind but add a more actionable message.
+                let io_err =
+                    std::io::Error::new(io.kind(), format!("Upstream stream interrupted: {io}"));
+                let _ = tx.send(Err(ParallaxError::Io(io_err))).await;
             }
-        };
-        let _ = tx.send(Err(ParallaxError::Io(io_err))).await;
+            tokio_util::codec::LinesCodecError::MaxLineLengthExceeded => {
+                // We split the upstream SSE stream by lines; if a single `data:` line exceeds
+                // our limit, LinesCodec will stop decoding.
+                tracing::error!(
+                    max_line_bytes = 1024 * 1024,
+                    "stream.parse_error: upstream line exceeded max length"
+                );
+                let io_err = std::io::Error::other(
+                    "Upstream stream line exceeded max length (1MB); provider likely emitted an oversized SSE frame",
+                );
+                let _ = tx.send(Err(ParallaxError::Io(io_err))).await;
+            }
+        }
         true
     }
 
@@ -855,21 +875,25 @@ impl StreamHandler {
             .join("blobs")
             .join("projected.json");
 
-        let projected_str = tokio::fs::read_to_string(&projected_path).await.map_err(|e| {
-            ParallaxError::Io(std::io::Error::other(format!(
-                "failed to read projected request at {}: {}",
-                projected_path.display(),
-                e
-            )))
-        })?;
-
-        let mut outgoing_request = serde_json::from_str::<crate::specs::openai::OpenAiRequest>(&projected_str)
+        let projected_str = tokio::fs::read_to_string(&projected_path)
+            .await
             .map_err(|e| {
-                ParallaxError::Internal(
-                    format!("failed to parse projected request JSON: {}", e),
-                    tracing_error::SpanTrace::capture(),
-                )
+                ParallaxError::Io(std::io::Error::other(format!(
+                    "failed to read projected request at {}: {}",
+                    projected_path.display(),
+                    e
+                )))
             })?;
+
+        let mut outgoing_request = serde_json::from_str::<crate::specs::openai::OpenAiRequest>(
+            &projected_str,
+        )
+        .map_err(|e| {
+            ParallaxError::Internal(
+                format!("failed to parse projected request JSON: {}", e),
+                tracing_error::SpanTrace::capture(),
+            )
+        })?;
 
         // Recovery tweak: remove stop sequences (they are a common cause of 0-token completions
         // in tool-heavy transcripts, e.g. "User:"/"Observation:").
@@ -908,7 +932,10 @@ impl StreamHandler {
         while let Some(line_result) = lines_stream.next().await {
             match line_result {
                 Ok(line) => {
-                    if let Some(data) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
+                    if let Some(data) = line
+                        .strip_prefix("data: ")
+                        .or_else(|| line.strip_prefix("data:"))
+                    {
                         let data = data.trim();
                         if tx
                             .send(Ok(axum::response::sse::Event::default().data(data)))
@@ -958,6 +985,7 @@ impl StreamHandler {
             flavor.as_ref(),
             &state.db,
             None,
+            &state.pricing,
         )
         .await;
 
@@ -1145,7 +1173,7 @@ impl StreamHandler {
         None
     }
 
-    #[allow(dead_code)]  // Kept for potential future diff-only retry logic
+    #[allow(dead_code)] // Kept for potential future diff-only retry logic
     async fn retry_with_diff_enforcement(
         state: std::sync::Arc<AppState>,
         conversation_id: &str,
@@ -1194,6 +1222,7 @@ impl StreamHandler {
             flavor.as_ref(),
             &state.db,
             intent,
+            &state.pricing,
         )
         .await;
 

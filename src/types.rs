@@ -428,6 +428,8 @@ pub struct CostModel {
     pub request: f64,
     pub prompt_cache_read: f64,
     pub prompt_cache_write: f64,
+    #[serde(default)]
+    pub context_length: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

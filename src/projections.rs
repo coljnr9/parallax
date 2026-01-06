@@ -106,6 +106,7 @@ impl OpenRouterAdapter {
         flavor: &dyn ProviderFlavor,
         db: &crate::db::DbPool,
         _intent: Option<crate::tui::Intent>,
+        pricing_map: &std::collections::HashMap<String, CostModel>,
     ) -> OpenAiRequest {
         tracing::info!("[⚙️  -> ⚙️ ] Projecting turn for model: {}", model_id);
         let is_thinking = model_id.contains("thinking")
@@ -114,12 +115,13 @@ impl OpenRouterAdapter {
             || model_id.contains("o1")
             || model_id.contains("o3");
 
-        // Extract and prune history if needed for Google models
-        let pruned_context = Self::prune_history_if_needed(context, flavor);
+        // Extract and prune history if needed (Google depth and general context length)
+        let pruned_context = Self::prune_history_if_needed(context, flavor, model_id, pricing_map);
 
         let messages = Self::transform_messages(&pruned_context, flavor, db).await;
 
-        let (max_tokens, max_completion_tokens, extra) = Self::extract_request_config(context, is_thinking);
+        let (max_tokens, max_completion_tokens, extra) =
+            Self::extract_request_config(context, is_thinking);
 
         let stop = Some(flavor.stop_sequences());
 
@@ -159,38 +161,84 @@ impl OpenRouterAdapter {
     fn prune_history_if_needed(
         context: &ConversationContext,
         flavor: &dyn ProviderFlavor,
+        model_id: &str,
+        pricing_map: &std::collections::HashMap<String, CostModel>,
     ) -> ConversationContext {
         let mut history = context.history.clone();
 
-        if flavor.kind() == ProviderKind::Google {
-            let analysis = crate::history_pruning::HistoryDepthAnalysis::analyze(&history);
-            if analysis.exceeds_google_limits() {
-                tracing::warn!(
-                    "[HISTORY-PRUNE] Google model exceeds limits: depth={}, turns={}, pruning/flattening...",
-                    analysis.estimated_json_depth,
-                    analysis.total_turns
-                );
-                // Use Flattening strategy for Google to reduce recursion depth
-                history = crate::history_pruning::prune_history(
-                    history,
-                    crate::history_pruning::PruningStrategy::Flattening,
-                    50,
-                );
-            } else if analysis.approaching_google_limits() {
-                tracing::info!(
-                    "[HISTORY-PRUNE] Google model approaching limits: depth={}, turns={}",
-                    analysis.estimated_json_depth,
-                    analysis.total_turns
-                );
-            }
-        }
+        history = Self::prune_for_google_limits(history, flavor);
+        history = Self::prune_for_context_budget(history, model_id, pricing_map);
 
-        // Create a modified context with pruned history
         let mut pruned_context = context.clone();
         pruned_context.history = history;
         pruned_context
     }
 
+    fn prune_for_google_limits(
+        history: Vec<TurnRecord>,
+        flavor: &dyn ProviderFlavor,
+    ) -> Vec<TurnRecord> {
+        if flavor.kind() != ProviderKind::Google {
+            return history;
+        }
+
+        let analysis = crate::history_pruning::HistoryDepthAnalysis::analyze(&history);
+        if analysis.exceeds_google_limits() {
+            tracing::warn!(
+                "[HISTORY-PRUNE] Google model exceeds limits: depth={}, turns={}, pruning/flattening...",
+                analysis.estimated_json_depth,
+                analysis.total_turns
+            );
+            return crate::history_pruning::prune_history(
+                history,
+                crate::history_pruning::PruningStrategy::Flattening,
+                50,
+            );
+        }
+
+        if analysis.approaching_google_limits() {
+            tracing::info!(
+                "[HISTORY-PRUNE] Google model approaching limits: depth={}, turns={}",
+                analysis.estimated_json_depth,
+                analysis.total_turns
+            );
+        }
+
+        history
+    }
+
+    fn prune_for_context_budget(
+        mut history: Vec<TurnRecord>,
+        model_id: &str,
+        pricing_map: &std::collections::HashMap<String, CostModel>,
+    ) -> Vec<TurnRecord> {
+        let model_info = match pricing_map.get(model_id) {
+            Some(m) => m,
+            None => return history,
+        };
+
+        let limit = match model_info.context_length {
+            Some(l) => l,
+            None => return history,
+        };
+
+        // Heuristic: Reserve 20% or at least 4k for the response
+        let safety_margin = (limit / 5).max(4096);
+        let budget = limit.saturating_sub(safety_margin) as usize;
+
+        let current_est = crate::token_counting::TokenEstimator::estimate_total_tokens(&history);
+        if current_est > budget {
+            tracing::warn!(
+                "[HISTORY-PRUNE] History (est {} tokens) exceeds budget ({} tokens) for model {}. Pruning...",
+                current_est,
+                budget,
+                model_id
+            );
+            history = crate::history_pruning::prune_to_token_budget(history, budget);
+        }
+
+        history
+    }
     fn extract_tools(extra_body: &serde_json::Value) -> Option<Vec<OpenAiTool>> {
         let raw_tools = extra_body.get("tools")?.as_array()?;
         let mut projected_tools = Vec::new();
@@ -711,6 +759,7 @@ mod tests {
         let _context = ConversationContext {
             history,
             conversation_id: "test".to_string(),
+            conversation_id_source: ConversationIdSource::Unknown,
             extra_body: json!({}),
         };
 

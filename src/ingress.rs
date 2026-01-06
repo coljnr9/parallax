@@ -336,6 +336,9 @@ impl RawTurn {
         tracing::warn!(
             "[⚙️  -> ⚙️ ] No cursorConversationId in metadata, falling back to anchor hash"
         );
-        Ok((self.generate_anchor_hash()?, ConversationIdSource::AnchorHash))
+        Ok((
+            self.generate_anchor_hash()?,
+            ConversationIdSource::AnchorHash,
+        ))
     }
 }
